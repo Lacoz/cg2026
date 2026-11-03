@@ -99,6 +99,20 @@ while True:
     defend_list = [c for _, _, c in defend_corners]
     secure_hold = not defend_list
 
+    def corner_pressured(c):
+        if opp.get(c, 0) > 0:
+            return True
+        return any(opp.get(n, 0) > 0 for n in adj.get(c, ()))
+
+    def tri_spawn_ready(a, b, c):
+        corners = (a, b, c)
+        if any(my.get(x, 0) <= opp.get(x, 0) for x in corners):
+            return False
+        if any(corner_pressured(x) for x in corners):
+            return all(my.get(x, 0) >= opp.get(x, 0) + 2 for x in corners)
+        total = sum(my.get(x, 0) for x in corners)
+        return total >= 4 and max(my.get(x, 0) for x in corners) >= 2
+
     owned = None
     if TARGET:
         info = next((t for t in tris if frozenset(t[:3]) == frozenset(TARGET)), None)
@@ -203,17 +217,19 @@ while True:
             cmds.append(f"MOVE {src} {dst} 1")
             used[src] = used.get(src, 0) + 1
 
-    spawn_ok = owned_tris and all(my.get(c, 0) > opp.get(c, 0) for c in owned_corners)
-    if spawn_ok:
-        if target_held and TARGET:
+    spawn_ready = False
+    if owned_tris:
+        if target_held and TARGET and tri_spawn_ready(*TARGET):
+            spawn_ready = True
             s = min(atk_corners, key=lambda h: my[h])
             r = [x for x in atk_corners if x != s]
             cmds.append(f"SPAWN {s} {r[0]} {r[1]}")
             TARGET = None
-        elif owned_tris:
-            best = max(owned_tris, key=lambda t: tri_area(*t))
-            a, b, c = best
-            if all(my.get(x, 0) > opp.get(x, 0) for x in (a, b, c)):
+        else:
+            ready = [t for t in owned_tris if tri_spawn_ready(*t)]
+            if ready:
+                spawn_ready = True
+                a, b, c = max(ready, key=lambda t: tri_area(*t))
                 s = min((a, b, c), key=lambda h: my[h])
                 r = [x for x in (a, b, c) if x != s]
                 cmds.append(f"SPAWN {s} {r[0]} {r[1]}")
@@ -224,6 +240,10 @@ while True:
     r = "R" if owned_tris and not secure_hold else "O"
     # UI message max ~20 znakov: v vojaci, t trojuholníky, f krehké rohy, r O/R, m H/A/I, c roh cieľa
     ui = f"v={army} t={n_owned} f={n_frag} r={r} m={m}"
+    if spawn_ready and len(ui) <= 17:
+        ui += " s=1"
+    elif owned_tris and len(ui) <= 17:
+        ui += " s=0"
     if TARGET and len(ui) <= 14:
         ui += f" c={min(atk_corners)}"
     if len(ui) > 20:

@@ -55,7 +55,7 @@ nodes=500,500_600,400_600,600_700,500_800,300_800,500"""
         bot.start(b)
         try:
             captured = False
-            for _ in range(12):
+            for _ in range(25):
                 cmd = bot.turn(b)
                 b.play_turn(cmd, "")
                 if any(t.owner == 0 for t in b.triangles):
@@ -65,7 +65,10 @@ nodes=500,500_600,400_600,600_700,500_800,300_800,500"""
         finally:
             bot.close()
         self.assertTrue(captured, "bot never captured triangle solo")
-        self.assertGreater(b.total_units(0), 3)
+        self.assertTrue(
+            b.total_units(0) > 3 or b.scores[0] >= 5,
+            "expected spawn growth or score from holding captured tri",
+        )
 
     def test_contested_allows_move_in_referee(self):
         opts = """seed=1

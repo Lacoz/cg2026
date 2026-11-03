@@ -109,7 +109,7 @@ python3 scripts/sim_turn.py --seed-file opts.txt --turns 20
 - **`hold_value`** = súčet plôch našich trojuholníkov; nový `TARGET` len ak `secure_hold` (všetky rohy `my > opp+1`) alebo hold nie je drahší než útok.
 - **`SPLIT_ARMY_AT = 8`**: pri držaných trojuholníkoch **72–90 %** pohyblivých jednotiek na obranu; ak je niečo krehké (`my ≤ opp+1`), min. **82 %**.
 - **Garrison**: malý trojuholník = 1 jednotka na rohu, veľký (`area ≥ 120k`) = **2**; pri súperovi `max(2, opp+1)`.
-- **Spawn** len keď `secure_hold` — inak neutrálneš trojuholník a stratíš body (typická príčina 79 jednotiek / 0 trojuholníkov).
+- **Spawn** len keď `f=0` (`secure_hold`) a **na každom rohu** daného trojuholníka `my ≥ opp+2` (pri súperovi/susedovi s jednotkou tiež `opp+2`). UI: `s=1` / `s=0`.
 
 ## Feedback loop (test → gate → submit)
 
