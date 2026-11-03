@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT"
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  test|eval|evaluate)
+    exec python3 scripts/evaluate.py "$@"
+    ;;
+  submit)
+    exec python3 scripts/submit.py "$@"
+    ;;
+  local)
+    exec bash scripts/local_referee.sh "$@"
+    ;;
+  replay)
+    exec python3 scripts/replay.py "$@"
+    ;;
+  weak|seeds)
+    exec python3 scripts/weak.py "$@"
+    ;;
+  limits)
+    python3 -c "
+import sys, yaml
+sys.path.insert(0,'scripts')
+from cg_lib import limits
+cfg=yaml.safe_load(open('scoring.yaml'))
+print(limits(cfg['challenge']))
+"
+    ;;
+  help|*)
+    cat <<EOF
+Usage: ./cg <command>
+
+  test [evaluate.py opts]   Run test games + scoring gates (see scoring.yaml)
+  submit [--force]          Evaluate, then submit if gates pass
+  weak [--arena]            Slabé hry: seed, game_id, príkaz replay + WEAK.md
+  replay [--ide]            Online replay podľa --seed / --game-id / --from-run
+  local [bot.py]            Build & run TryAngle referee + viewer (needs mvn, java)
+  limits                    Show API test-game rate limits
+
+Examples:
+  ./cg test
+  ./cg weak --arena
+  ./cg replay --seed -6223031671034579000 --opponent boss --ide
+  ./cg replay --game-id 916010962 --ide
+  ./cg replay --from-run 12 --ide
+  ./cg submit
+  ./cg submit --force
+EOF
+    ;;
+esac

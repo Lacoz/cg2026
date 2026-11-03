@@ -1,0 +1,34 @@
+# Local evaluation gates — run: python3 scripts/evaluate.py
+# Submit only if gates pass: python3 scripts/submit.py
+
+challenge: fall-challenge-2026
+bot: bot.py
+language: Python3
+
+# CodinGame test-game opponents (see API /opponents)
+opponents:
+  - id: boss
+    games: 5
+    gates:
+      min_win_rate: 0.35
+      min_median_score: 15
+      max_crash_rate: 0.2
+  - id: default
+    games: 3
+    gates:
+      min_win_rate: 0.5
+      min_median_score: 10
+
+# Parsed from game log (agent 0 = our bot)
+metrics:
+  track:
+    - win
+    - my_score
+    - opp_score
+    - spawns
+    - captures
+    - move_errors
+    - timeout
+    - eliminated
+
+results_dir: results
