@@ -203,12 +203,38 @@ while True:
                 return True
         return m > min_stay(src)
 
-    for src in def_units:
+    pri = primary_def()
+    empty_def = [c for c in defend_list if my.get(c, 0) <= opp.get(c, 0)]
+    for src in sorted(set(units), key=lambda h: -(my[h] - opp[h])):
+        if not empty_def or my[src] - opp[src] <= 1:
+            continue
+        dst = min(empty_def, key=lambda c: move_energy(src, c))
+        if used.get(src, 0) >= 1 or my[src] <= 1:
+            continue
+        cmds.append(f"MOVE {src} {dst} 1")
+        used[src] = used.get(src, 0) + 1
+        break
+
+    def_movers = []
+    for h in sorted(set(units)):
+        if h not in owned_corners:
+            def_movers.append(h)
+        elif defend_list:
+            if my[h] - opp[h] >= 2:
+                continue
+            if pri and h == pri:
+                continue
+            def_movers.append(h)
+    for src in def_movers:
         if not defend_list:
+            break
+        others = [c for c in defend_list if c != src]
+        if not others:
             continue
-        dst = min(defend_list, key=lambda c: (my.get(c, 0) - opp.get(c, 0), move_energy(src, c)))
-        if src == dst:
-            continue
+        if pri and src != pri:
+            dst = pri
+        else:
+            dst = min(others, key=lambda c: (my.get(c, 0) - opp.get(c, 0), move_energy(src, c)))
         if used.get(src, 0) >= lim_src(src, dst) or not can_leave_owned(src, dst):
             continue
         cmds.append(f"MOVE {src} {dst} 1")
