@@ -31,33 +31,46 @@ while True:
     for i in range(linkable_count):
         house1, house2 = [int(j) for j in input().split()]
 
-    # --- stratégia (≤30 riadkov) ---
-    if TARGET and any(frozenset(t[:3]) == frozenset(TARGET) and t[3] == 0 for t in tris):
-        TARGET = None
-    if TARGET is None:
-        cand = [t for t in tris if t[4]] or tris
+    # --- obsad → drž → spawn (jeden trojuholník naraz) ---
+    owned = None
+    mine = [(t[0], t[1], t[2]) for t in tris if t[3] == 0]
+    if mine:
+        TARGET = mine[0] if TARGET is None or TARGET not in mine else TARGET
+        owned = TARGET
+    elif TARGET is None:
+        cand = [t for t in tris if t[4] and t[3] != 0] or [t for t in tris if t[3] != 0] or tris
         t = min(cand, key=lambda x: sum(my.get(c, 0) for c in x[:3]))
         TARGET = (t[0], t[1], t[2])
     corners = sorted(TARGET)
+    corner_set = set(corners)
     units = []
     for h in sorted(my):
         m, o = my[h], opp[h]
         if m > 0 and (o == 0 or m > o):
             units += [h] * (m - o if o else m)
+    weak = [c for c in corners if my.get(c, 0) <= opp.get(c, 0)]
+    held = owned and not weak
     cmds, used = [], {}
     for i, src in enumerate(units):
         lim = (my[src] - opp[src]) if opp[src] else my[src]
         if used.get(src, 0) >= lim:
             continue
-        dst = corners[i % 3]
-        if src == dst:
-            dst = corners[(i + 1) % 3]
+        if src in corner_set and my[src] > opp[src]:
+            continue
+        if owned:
+            if not weak:
+                continue
+            dst = weak[i % len(weak)]
+        else:
+            dst = corners[i % len(corners)]
+            if src == dst:
+                continue
         if src != dst:
             cmds.append(f"MOVE {src} {dst} 1")
             used[src] = used.get(src, 0) + 1
-    for a, b, c, owner, _, _ in tris:
-        if owner == 0:
-            s = min((a, b, c), key=lambda h: my[h])
-            r = [x for x in (a, b, c) if x != s]
-            cmds.append(f"SPAWN {s} {r[0]} {r[1]}")
+    if held:
+        s = min(corners, key=lambda h: my[h])
+        r = [x for x in corners if x != s]
+        cmds.append(f"SPAWN {s} {r[0]} {r[1]}")
+        TARGET = None
     print(";".join(cmds) if cmds else ";", flush=True)
