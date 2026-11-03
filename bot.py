@@ -1,5 +1,5 @@
 import sys
-from collections import Counter, deque
+from collections import deque
 from typing import Dict, List, Optional, Set, Tuple
 
 houses: Dict[int, Tuple[int, int]] = {}
@@ -41,19 +41,13 @@ def dist(a: int, b: int) -> int:
     return len(p) - 1 if p else 10**9
 
 
-def node_owner(my_u: Dict[int, int], opp_u: Dict[int, int], h: int) -> int:
-    nbs = adj.get(h, ())
-    if nbs:
-        if all(my_u.get(n, 0) > opp_u.get(n, 0) for n in nbs):
-            return 0
-        if all(opp_u.get(n, 0) > my_u.get(n, 0) for n in nbs):
-            return 1
-    m, o = my_u.get(h, 0), opp_u.get(h, 0)
-    if m > o:
-        return 0
-    if o > m:
-        return 1
-    return -1
+def next_step(src: int, dst: int) -> Optional[int]:
+    if src == dst:
+        return None
+    p = paths.get(src, {}).get(dst)
+    if not p or len(p) < 2:
+        return None
+    return p[1]
 
 
 class Triangle:
@@ -69,242 +63,219 @@ class Triangle:
         return self.a, self.b, self.c
 
 
-def total_units(my_u: Dict[int, int]) -> int:
-    return sum(my_u.values())
+def we_control_corner(c: int, my_u: Dict[int, int], opp_u: Dict[int, int]) -> bool:
+    return my_u.get(c, 0) > opp_u.get(c, 0)
 
 
-def would_surround(
-    h: int, my_u: Dict[int, int], opp_u: Dict[int, int], leave: int
-) -> bool:
-    nbs = adj.get(h, ())
-    if not nbs or my_u.get(h, 0) - leave <= 0:
-        return False
-    for n in nbs:
-        if opp_u.get(n, 0) <= my_u.get(n, 0):
-            return False
-    return True
+def corner_deficit(c: int, my_u: Dict[int, int], opp_u: Dict[int, int]) -> int:
+    """How many more units we want on c to secure strict majority."""
+    m, o = my_u.get(c, 0), opp_u.get(c, 0)
+    if m > o:
+        return 0
+    return o - m + 1
 
 
-def movable_units(h: int, my_u: Dict[int, int], opp_u: Dict[int, int]) -> int:
+def movable_from(h: int, my_u: Dict[int, int], opp_u: Dict[int, int]) -> int:
     m, o = my_u.get(h, 0), opp_u.get(h, 0)
     if m <= 0:
         return 0
     if o > 0:
-        return max(0, m - o - 1)
-    if would_surround(h, my_u, opp_u, 1):
-        return 0
+        if m <= o:
+            return 0
+        return m - o
     return m
 
 
-def units_needed_on_corner(c: int, my_u: Dict[int, int], opp_u: Dict[int, int]) -> int:
-    return max(0, opp_u.get(c, 0) - my_u.get(c, 0) + 1)
+def movable_from_garrison(
+    h: int,
+    garrison: Set[int],
+    my_u: Dict[int, int],
+    opp_u: Dict[int, int],
+) -> int:
+    """On a focus corner we control, never move away the last securing unit."""
+    base = movable_from(h, my_u, opp_u)
+    if h not in garrison or base <= 0:
+        return base
+    m, o = my_u.get(h, 0), opp_u.get(h, 0)
+    if m <= o:
+        return base
+    # Keep at least one unit while we hold the corner (o==0 → leave m-1 max).
+    keep = 1 if o == 0 else o + 1
+    return max(0, min(base, m - keep))
 
 
-def mission_limit(my_u: Dict[int, int]) -> int:
-    n = total_units(my_u)
-    if n <= 5:
-        return 1
-    if n <= 14:
-        return 2
-    return 3
+def focus_triangle(
+    triangles: List[Triangle], my_u: Dict[int, int], opp_u: Dict[int, int]
+) -> Optional[Triangle]:
+    unit_houses = [h for h in houses if my_u.get(h, 0) > 0]
+    if not unit_houses:
+        return None
 
+    best: Optional[Triangle] = None
+    best_key: Tuple = (10**9, 10**9, 10**9)
 
-def mission_score(
-    t: Triangle, my_u: Dict[int, int], opp_u: Dict[int, int]
-) -> Tuple:
-    if not t.me_cap:
-        return (1, 0, 0, 0)
-    owned_corners = sum(1 for c in t.corners() if node_owner(my_u, opp_u, c) == 0)
-    need = [c for c in t.corners() if node_owner(my_u, opp_u, c) != 0]
-    if not need and t.owner != 0:
-        return (1, 0, 0, 0)
-
-    pool: List[int] = []
-    for h in houses:
-        pool.extend([h] * movable_units(h, my_u, opp_u))
-    reach = 0
-    if need and pool:
-        used = [False] * len(pool)
-        for c in sorted(need, key=lambda x: my_u.get(x, 0) - opp_u.get(x, 0)):
-            best_d, best_i = 10**9, -1
-            for i, h in enumerate(pool):
-                if used[i]:
-                    continue
-                d = dist(h, c)
-                if d < best_d:
-                    best_d, best_i = d, i
-            if best_i >= 0:
-                used[best_i] = True
-                reach += best_d
-            else:
-                reach += 400
-    elif need:
-        reach = 999
-
-    defend = 0 if t.owner == 0 and need else 1
-    return (defend, -owned_corners, reach, sum(units_needed_on_corner(c, my_u, opp_u) for c in need))
-
-
-def mission_triangles(
-    my_u: Dict[int, int], opp_u: Dict[int, int], triangles: List[Triangle]
-) -> List[Triangle]:
-    scored: List[Tuple[Tuple, Triangle]] = []
     for t in triangles:
         if not t.me_cap:
             continue
-        need = [c for c in t.corners() if node_owner(my_u, opp_u, c) != 0]
+        corners = t.corners()
+        owned = sum(1 for c in corners if we_control_corner(c, my_u, opp_u))
+        need = [c for c in corners if corner_deficit(c, my_u, opp_u) > 0]
         if not need:
             continue
-        scored.append((mission_score(t, my_u, opp_u), t))
-    scored.sort(key=lambda x: x[0])
-    limit = mission_limit(my_u)
-    return [t for _, t in scored[:limit]]
+
+        reach = sum(min(dist(h, c) for h in unit_houses) for c in need)
+        key = (-owned, reach, min(corners))
+        if key < best_key:
+            best_key = key
+            best = t
+    return best
 
 
-def coordinate_triangle(
-    t: Triangle,
+def list_movable_units(
+    garrison: Set[int], my_u: Dict[int, int], opp_u: Dict[int, int]
+) -> List[int]:
+    units: List[int] = []
+    for h in sorted(houses):
+        n = movable_from_garrison(h, garrison, my_u, opp_u)
+        units.extend([h] * n)
+    return units
+
+
+def assign_units_to_corners(
+    corners: Tuple[int, int, int],
+    units: List[int],
     my_u: Dict[int, int],
     opp_u: Dict[int, int],
-    budget: Counter,
 ) -> List[Tuple[int, int]]:
-    need = [c for c in t.corners() if node_owner(my_u, opp_u, c) != 0]
-    if not need:
-        return []
-    need_set = set(need)
-    need.sort(
-        key=lambda c: (
-            my_u.get(c, 0) - opp_u.get(c, 0),
-            units_needed_on_corner(c, my_u, opp_u),
-            -opp_u.get(c, 0),
-        )
-    )
-    demand = {c: max(1, units_needed_on_corner(c, my_u, opp_u)) for c in need}
-    assignments: List[Tuple[int, int]] = []
+    """One inbound unit per needy corner first; spread, never stack all on one roh."""
+    corner_list = list(corners)
+    needy = [c for c in corner_list if corner_deficit(c, my_u, opp_u) > 0]
+    if not needy:
+        needy = corner_list
 
-    def pick_source(target: int) -> Optional[int]:
-        best_h, best_d = None, 10**9
-        for h in houses:
-            if budget[h] <= 0:
-                continue
-            if h in need_set and my_u.get(h, 0) <= opp_u.get(h, 0):
-                continue
-            d = dist(h, target)
+    needy.sort(key=lambda c: (-corner_deficit(c, my_u, opp_u), -opp_u.get(c, 0), c))
+
+    options: List[Tuple[int, int, int, int, int]] = []
+    for ui, src in enumerate(units):
+        for c in needy:
+            d = dist(src, c)
             if d >= 10**8:
                 continue
-            if d < best_d:
-                best_d, best_h = d, h
-        return best_h
+            options.append(
+                (d, -corner_deficit(c, my_u, opp_u), ui, src, c)
+            )
+    options.sort()
 
-    for c in need:
-        src = pick_source(c)
-        if src is None:
+    assigned_ui: Set[int] = set()
+    assigned_dst: Set[int] = set()
+    pairs: List[Tuple[int, int]] = []
+
+    corner_set = set(corner_list)
+
+    for d, deficit, ui, src, c in options:
+        if ui in assigned_ui:
             continue
-        assignments.append((src, c))
-        demand[c] = max(0, demand[c] - 1)
-        budget[src] -= 1
+        if c in assigned_dst and deficit <= 1:
+            continue
+        if src == c:
+            continue
+        if we_control_corner(c, my_u, opp_u) and deficit == 0:
+            continue
+        if (
+            src in corner_set
+            and we_control_corner(src, my_u, opp_u)
+            and corner_deficit(src, my_u, opp_u) == 0
+            and deficit <= 1
+        ):
+            continue
+        pairs.append((src, c))
+        assigned_ui.add(ui)
+        assigned_dst.add(c)
 
-    while sum(budget.values()) > 0:
-        progressed = False
-        for c in need:
-            if demand[c] <= 0:
-                continue
-            src = pick_source(c)
-            if src is None:
-                continue
-            assignments.append((src, c))
-            demand[c] -= 1
-            budget[src] -= 1
-            progressed = True
-        if not progressed:
-            break
+    for ui, src in enumerate(units):
+        if ui in assigned_ui:
+            continue
+        best_c = min(
+            needy,
+            key=lambda c: (dist(src, c), -corner_deficit(c, my_u, opp_u), c),
+        )
+        if dist(src, best_c) >= 10**8 or src == best_c:
+            continue
+        if we_control_corner(best_c, my_u, opp_u) and corner_deficit(best_c, my_u, opp_u) == 0:
+            continue
+        if (
+            src in corner_set
+            and we_control_corner(src, my_u, opp_u)
+            and corner_deficit(src, my_u, opp_u) == 0
+            and corner_deficit(best_c, my_u, opp_u) <= 1
+        ):
+            continue
+        pairs.append((src, best_c))
+        assigned_ui.add(ui)
 
-    return assignments
+    return pairs
 
 
-def assign_moves(
+def build_moves(
     my_u: Dict[int, int], opp_u: Dict[int, int], triangles: List[Triangle]
 ) -> List[str]:
-    budget: Counter = Counter()
-    for h in houses:
-        budget[h] = movable_units(h, my_u, opp_u)
+    focus = focus_triangle(triangles, my_u, opp_u)
+    if focus is None:
+        return []
 
-    pairs: List[Tuple[int, int]] = []
-    missions = mission_triangles(my_u, opp_u, triangles)
-    for t in missions:
-        if sum(budget.values()) <= 0:
-            break
-        pairs.extend(coordinate_triangle(t, my_u, opp_u, budget))
+    garrison = set(focus.corners())
+    units = list_movable_units(garrison, my_u, opp_u)
+    if not units:
+        return []
 
-    # Use every remaining unit — army must grow, not sit at 3.
-    needy: List[int] = []
-    for t in missions:
-        for c in t.corners():
-            if node_owner(my_u, opp_u, c) != 0:
-                needy.append(c)
-    needy.sort(key=lambda c: (my_u.get(c, 0) - opp_u.get(c, 0), -opp_u.get(c, 0)))
-    if not needy:
-        for t in triangles:
-            if not t.me_cap:
-                continue
-            for c in t.corners():
-                if node_owner(my_u, opp_u, c) != 0:
-                    needy.append(c)
-
-    def pick_spare() -> Optional[Tuple[int, int]]:
-        best: Optional[Tuple[int, int, int]] = None
-        for h in houses:
-            if budget[h] <= 0:
-                continue
-            for c in needy:
-                d = dist(h, c)
-                if d >= 10**8:
-                    continue
-                score = -d * 10 + opp_u.get(c, 0) * 5
-                if best is None or score > best[0]:
-                    best = (score, h, c)
-        if best is None:
-            return None
-        return best[1], best[2]
-
-    while sum(budget.values()) > 0:
-        pair = pick_spare()
-        if pair is None:
-            break
-        src, corner = pair
-        pairs.append((src, corner))
-        budget[src] -= 1
-
-    max_per_house = {h: movable_units(h, my_u, opp_u) for h in houses}
-    used: Counter = Counter()
+    pairs = assign_units_to_corners(focus.corners(), units, my_u, opp_u)
     cmds: List[str] = []
-    for src, corner in pairs:
-        if used[src] >= max_per_house.get(src, 0):
+    used: Dict[int, int] = {}
+
+    for src, dst in pairs:
+        cap = movable_from_garrison(src, garrison, my_u, opp_u)
+        if used.get(src, 0) >= cap:
             continue
-        if would_surround(src, my_u, opp_u, used[src] + 1):
+        nxt = next_step(src, dst)
+        if nxt is None:
             continue
-        if src == corner or dist(src, corner) >= 10**8:
-            continue
-        cmds.append(f"MOVE {src} {corner} 1")
-        used[src] += 1
+        cmds.append(f"MOVE {src} {dst} 1")
+        used[src] = used.get(src, 0) + 1
+
     return cmds
 
 
-def spawn_for_triangle(
-    t: Triangle,
+def build_spawns(
+    triangles: List[Triangle],
     my_u: Dict[int, int],
     opp_u: Dict[int, int],
-    next_corners: Set[int],
-) -> Tuple[int, int, int]:
-    corners = list(t.corners())
-    if next_corners:
-        pick = [c for c in corners if c in next_corners]
-        if pick:
-            first = min(pick, key=lambda c: (my_u.get(c, 0), -opp_u.get(c, 0), c))
-            rest = [c for c in corners if c != first]
-            return first, rest[0], rest[1]
-    first = min(corners, key=lambda c: (my_u.get(c, 0), -opp_u.get(c, 0), c))
-    rest = [c for c in corners if c != first]
-    return first, rest[0], rest[1]
+    focus: Optional[Triangle],
+) -> List[str]:
+    cmds: List[str] = []
+    expand_corners: List[int] = []
+    if focus:
+        expand_corners = [
+            c for c in focus.corners() if corner_deficit(c, my_u, opp_u) > 0
+        ]
+
+    for t in triangles:
+        if t.owner != 0:
+            continue
+        a, b, c = t.corners()
+        spawn_on = a
+        if expand_corners:
+            candidates = [x for x in (a, b, c) if x in expand_corners]
+            if candidates:
+                spawn_on = min(
+                    candidates, key=lambda h: (my_u.get(h, 0), -opp_u.get(h, 0), h)
+                )
+            else:
+                spawn_on = min((a, b, c), key=lambda h: (my_u.get(h, 0), h))
+        else:
+            spawn_on = min((a, b, c), key=lambda h: (my_u.get(h, 0), h))
+        rest = [x for x in (a, b, c) if x != spawn_on]
+        cmds.append(f"SPAWN {spawn_on} {rest[0]} {rest[1]}")
+    return cmds
 
 
 def generate_turn(
@@ -312,21 +283,9 @@ def generate_turn(
     opp_u: Dict[int, int],
     triangles: List[Triangle],
 ) -> str:
-    missions = mission_triangles(my_u, opp_u, triangles)
-    next_corners: Set[int] = set()
-    for t in missions:
-        for c in t.corners():
-            if node_owner(my_u, opp_u, c) != 0:
-                next_corners.add(c)
-
-    move_cmds = assign_moves(my_u, opp_u, triangles)
-
-    spawn_cmds: List[str] = []
-    for t in triangles:
-        if t.owner == 0:
-            h1, h2, h3 = spawn_for_triangle(t, my_u, opp_u, next_corners)
-            spawn_cmds.append(f"SPAWN {h1} {h2} {h3}")
-
+    focus = focus_triangle(triangles, my_u, opp_u)
+    move_cmds = build_moves(my_u, opp_u, triangles)
+    spawn_cmds = build_spawns(triangles, my_u, opp_u, focus)
     parts = move_cmds + spawn_cmds
     return ";".join(parts) if parts else ";"
 
