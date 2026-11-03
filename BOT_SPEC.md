@@ -100,15 +100,14 @@ python3 scripts/sim_turn.py --seed-file opts.txt --turns 20
 
 **Dôležité:** `MOVE A B 1` = **jeden krok** po najkratšej ceste (napr. `14→3` môže ísť cez `33`). Bot musí mať **jeden proces na hru** (`TARGET` sa pamätá).
 
-### Rozdelenie armády (`SPLIT_ARMY_AT = 6`)
+### Držanie vs expanzia (2D „energia“)
 
-| Počet jednotiek | Správanie |
-|-----------------|-----------|
-| &lt; 6 | Všetko na útok / dokončenie `TARGET` |
-| ≥ 6 a máme `owner==0` trojuholníky | ~**polovica** pohyblivých jednotiek posilňuje **slabé rohy** už získaných trojuholníkov, zvyšok útočí na `TARGET` |
-| Garrison | Na rohu našej trojuholníka s `my ≤ opp+1` neodíde posledná jednotka |
-
-Spawn: bezpečný `TARGET` → spawn + nový cieľ; inak max. **1× spawn** na inom držanom trojuholníku za ťah (minimálna expanzia).
+- **Plocha** trojuholníka z `(x,y)` rohov → väčší = vyššia priorita obrany.
+- **Energia pohybu** ≈ `kroky_BFS × 80 + euklid_vzdialenosť × 0.15` — obranné jednotky idú na najbližší kritický roh.
+- **`hold_value`** = súčet plôch našich trojuholníkov; nový `TARGET` len ak `secure_hold` (všetky rohy `my > opp+1`) alebo hold nie je drahší než útok.
+- **`SPLIT_ARMY_AT = 8`**: pri držaných trojuholníkoch **72–90 %** pohyblivých jednotiek na obranu; ak je niečo krehké (`my ≤ opp+1`), min. **82 %**.
+- **Garrison**: malý trojuholník = 1 jednotka na rohu, veľký (`area ≥ 120k`) = **2**; pri súperovi `max(2, opp+1)`.
+- **Spawn** len keď `secure_hold` — inak neutrálneš trojuholník a stratíš body (typická príčina 79 jednotiek / 0 trojuholníkov).
 
 ## Feedback loop (test → gate → submit)
 

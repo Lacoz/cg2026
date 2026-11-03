@@ -3,7 +3,8 @@ import math
 from collections import deque
 
 TARGET = None
-SPLIT_ARMY_AT = 6  # od tohto počtu jednotiek polovica bráni, polovica útočí
+SPLIT_ARMY_AT = 8
+GARRISON_AREA = 120_000.0  # väčší trojuholník → 2 jednotky na rohu
 houses = {}
 adj = {}
 
@@ -20,11 +21,27 @@ def bfs(src):
     return d
 
 
+def tri_area(a, b, c):
+    ax, ay = houses[a]
+    bx, by = houses[b]
+    cx, cy = houses[c]
+    return abs((bx - ax) * (cy - ay) - (cx - ax) * (by - ay)) / 2.0
+
+
 def reach_triangle(corners, unit_houses):
     total = 0
     for c in corners:
         total += min(bfs(u).get(c, 999) for u in unit_houses)
     return total
+
+
+def move_energy(src, dst):
+    steps = bfs(src).get(dst, 999)
+    if steps >= 999:
+        return 1e9
+    sx, sy = houses[src]
+    dx, dy = houses[dst]
+    return steps * 80 + math.hypot(dx - sx, dy - sy) * 0.15
 
 
 house_count = int(input())
@@ -59,18 +76,28 @@ while True:
     for i in range(linkable_count):
         house1, house2 = [int(j) for j in input().split()]
 
-    # --- obrana získaných | útok na TARGET | spawn ---
     unit_h = [h for h in my if my[h] > 0]
     army = sum(my.values())
     owned_tris = [(t[0], t[1], t[2]) for t in tris if t[3] == 0]
-    owned_corners = set()
-    defend_weak = []
+    owned_area = sum(tri_area(a, b, c) for a, b, c in owned_tris)
+    corner_area = {}
     for a, b, c in owned_tris:
+        ar = tri_area(a, b, c)
+        for corner in (a, b, c):
+            corner_area[corner] = max(corner_area.get(corner, 0.0), ar)
+
+    owned_corners = set()
+    defend_corners = []
+    for a, b, c in owned_tris:
+        ar = tri_area(a, b, c)
         for corner in (a, b, c):
             owned_corners.add(corner)
-            if my.get(corner, 0) <= opp.get(corner, 0):
-                defend_weak.append(corner)
-    defend_weak.sort(key=lambda c: (my.get(c, 0) - opp.get(c, 0), c))
+            margin = my.get(corner, 0) - opp.get(corner, 0)
+            if margin <= 1:
+                defend_corners.append((margin, -ar, corner))
+    defend_corners.sort()
+    defend_list = [c for _, _, c in defend_corners]
+    secure_hold = not defend_list
 
     owned = None
     if TARGET:
@@ -79,8 +106,10 @@ while True:
             owned = TARGET
         elif info and (info[3] != 0 or not info[4]):
             TARGET = None
-    if TARGET is None and unit_h:
+
+    if TARGET is None and unit_h and (not owned_tris or secure_hold):
         cand = [t for t in tris if t[4] and t[3] != 0] or [t for t in tris if t[3] != 0] or tris
+        atk_energy = 1.0
         t = min(
             cand,
             key=lambda x: (
@@ -89,16 +118,27 @@ while True:
                 -sum(my.get(c, 0) for c in x[:3]),
             ),
         )
-        TARGET = (t[0], t[1], t[2])
+        atk_energy = reach_triangle(t[:3], unit_h) + 1
+        hold_value = owned_area + len(owned_tris) * 50_000
+        if owned_tris and hold_value > atk_energy * 40_000:
+            TARGET = None
+        else:
+            TARGET = (t[0], t[1], t[2])
 
     units = []
     for h in sorted(my):
         m, o = my[h], opp[h]
         if m > 0 and (o == 0 or m > o):
             units += [h] * (m - o if o else m)
-    if army >= SPLIT_ARMY_AT and owned_tris:
-        half = len(units) // 2
-        def_units, atk_units = units[:half], units[half:]
+
+    if owned_tris and army >= SPLIT_ARMY_AT:
+        hold_value = owned_area + len(defend_list) * 80_000
+        atk_e = reach_triangle(TARGET, unit_h) + 1 if TARGET else 50
+        def_frac = 0.72 + min(0.18, hold_value / (hold_value + atk_e * 35_000))
+        if not secure_hold:
+            def_frac = max(def_frac, 0.82)
+        n_def = min(len(units) - 1, max(int(len(units) * def_frac), len(defend_list) + len(owned_tris)))
+        def_units, atk_units = units[:n_def], units[n_def:]
     else:
         def_units, atk_units = [], units
 
@@ -109,67 +149,72 @@ while True:
 
     cmds, used = [], {}
 
+    def min_stay(h):
+        m, o = my[h], opp[h]
+        if h not in owned_corners or m <= o:
+            return 0
+        need = 2 if corner_area.get(h, 0) >= GARRISON_AREA else 1
+        if o > 0:
+            need = max(need, o + 1)
+        return min(m, need)
+
     def lim_src(src):
         m, o = my[src], opp[src]
-        return (m - o) if o else m
+        if m <= 0 or (o > 0 and m <= o):
+            return 0
+        cap = m - o if o else m
+        if src in owned_corners:
+            cap = max(0, min(cap, m - min_stay(src)))
+        return cap
 
-    def garrison(src, corner_set):
-        return (
-            src in corner_set
-            and my[src] > opp[src]
-            and my[src] <= opp[src] + 1
-        )
+    def can_leave_owned(src):
+        if src not in owned_corners:
+            return True
+        return min_stay(src) < my[src]
 
-    for i, src in enumerate(def_units):
-        if used.get(src, 0) >= lim_src(src):
+    for src in def_units:
+        if used.get(src, 0) >= lim_src(src) or not can_leave_owned(src):
             continue
-        if garrison(src, owned_corners):
+        if not defend_list:
             continue
-        if not defend_weak:
-            continue
-        dst = defend_weak[i % len(defend_weak)]
+        dst = min(defend_list, key=lambda c: (my.get(c, 0) - opp.get(c, 0), move_energy(src, c)))
         if src == dst:
             continue
         cmds.append(f"MOVE {src} {dst} 1")
         used[src] = used.get(src, 0) + 1
 
-    atk_units.sort(key=lambda h: (1 if garrison(h, owned_corners) else 0, h))
+    atk_units.sort(key=lambda h: (1 if h in owned_corners else 0, h))
     for i, src in enumerate(atk_units):
         if not TARGET:
             break
-        if used.get(src, 0) >= lim_src(src):
-            continue
-        if garrison(src, owned_corners):
+        if used.get(src, 0) >= lim_src(src) or not can_leave_owned(src):
             continue
         if owned and src in atk_set and my[src] > opp[src]:
             continue
         if owned:
             if not atk_weak:
                 continue
-            dst = atk_weak[i % len(atk_weak)]
+            dst = min(atk_weak, key=lambda c: move_energy(src, c))
         else:
             dst = atk_corners[i % len(atk_corners)]
             if src == dst:
-                continue
-            if garrison(src, atk_set):
                 continue
         if src != dst:
             cmds.append(f"MOVE {src} {dst} 1")
             used[src] = used.get(src, 0) + 1
 
-    if target_held and TARGET:
-        s = min(atk_corners, key=lambda h: my[h])
-        r = [x for x in atk_corners if x != s]
-        cmds.append(f"SPAWN {s} {r[0]} {r[1]}")
-        TARGET = None
-    elif owned_tris:
-        for a, b, c in owned_tris:
-            if frozenset((a, b, c)) == frozenset(TARGET or ()):
-                continue
-            corners = (a, b, c)
-            if all(my.get(x, 0) > opp.get(x, 0) for x in corners):
-                s = min(corners, key=lambda h: my[h])
-                r = [x for x in corners if x != s]
+    spawn_ok = owned_tris and all(my.get(c, 0) > opp.get(c, 0) for c in owned_corners)
+    if spawn_ok:
+        if target_held and TARGET:
+            s = min(atk_corners, key=lambda h: my[h])
+            r = [x for x in atk_corners if x != s]
+            cmds.append(f"SPAWN {s} {r[0]} {r[1]}")
+            TARGET = None
+        elif owned_tris:
+            best = max(owned_tris, key=lambda t: tri_area(*t))
+            a, b, c = best
+            if all(my.get(x, 0) > opp.get(x, 0) for x in (a, b, c)):
+                s = min((a, b, c), key=lambda h: my[h])
+                r = [x for x in (a, b, c) if x != s]
                 cmds.append(f"SPAWN {s} {r[0]} {r[1]}")
-                break
     print(";".join(cmds) if cmds else ";", flush=True)
