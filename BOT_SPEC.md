@@ -98,6 +98,8 @@ Referee logika (MOVE → SPAWN → surround → capture) je v `scripts/game_sim.
 python3 scripts/sim_turn.py --seed-file opts.txt --turns 20
 ```
 
+Každý ťah bot posiela **`MSG …`** (zobrazí sa v UI / player message): `vojaci`, `moje_tri`, `body`, `krehke_rohy`, `OK|RISK`, `rezim=HOLD|ATK|IDLE`, `ciel=`-` alebo rohy cieľového trojuholníka.
+
 **Dôležité:** `MOVE A B 1` = **jeden krok** po najkratšej ceste (napr. `14→3` môže ísť cez `33`). Bot musí mať **jeden proces na hru** (`TARGET` sa pamätá).
 
 ### Držanie vs expanzia (2D „energia“)

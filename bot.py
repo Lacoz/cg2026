@@ -217,4 +217,16 @@ while True:
                 s = min((a, b, c), key=lambda h: my[h])
                 r = [x for x in (a, b, c) if x != s]
                 cmds.append(f"SPAWN {s} {r[0]} {r[1]}")
-    print(";".join(cmds) if cmds else ";", flush=True)
+    n_owned = len(owned_tris)
+    n_frag = len(defend_list)
+    mode = "HOLD" if owned_tris and not secure_hold else ("ATK" if TARGET else "IDLE")
+    t_label = "-"
+    if TARGET:
+        t_label = f"{atk_corners[0]}-{atk_corners[1]}-{atk_corners[2]}"
+    risk = "OK" if secure_hold or not owned_tris else "RISK"
+    status = (
+        f"MSG vojaci={army} moje_tri={n_owned} body={my_score} "
+        f"krehke_rohy={n_frag} {risk} rezim={mode} ciel={t_label}"
+    )
+    out = [status] + cmds
+    print(";".join(out), flush=True)
