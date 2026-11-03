@@ -1,11 +1,36 @@
 import sys
 import math
+from collections import deque
 
 TARGET = None
+houses = {}
+adj = {}
+
+
+def bfs(src):
+    d = {src: 0}
+    q = deque([src])
+    while q:
+        u = q.popleft()
+        for v in adj.get(u, ()):
+            if v not in d:
+                d[v] = d[u] + 1
+                q.append(v)
+    return d
+
+
+def reach_triangle(corners, unit_houses):
+    total = 0
+    for c in corners:
+        total += min(bfs(u).get(c, 999) for u in unit_houses)
+    return total
+
 
 house_count = int(input())
 for i in range(house_count):
     house_id, house_x, house_y = [int(j) for j in input().split()]
+    houses[house_id] = (house_x, house_y)
+    adj.setdefault(house_id, set())
 
 while True:
     my_score, opponent_score = [int(i) for i in input().split()]
@@ -16,6 +41,8 @@ while True:
     path_count = int(input())
     for i in range(path_count):
         house1, house2 = [int(j) for j in input().split()]
+        adj.setdefault(house1, set()).add(house2)
+        adj.setdefault(house2, set()).add(house1)
     triangle_count = int(input())
     tris = []
     for i in range(triangle_count):
@@ -31,16 +58,29 @@ while True:
     for i in range(linkable_count):
         house1, house2 = [int(j) for j in input().split()]
 
-    # --- obsad → drž → spawn (jeden trojuholník naraz) ---
+    # --- obsad → drž → spawn ---
+    unit_h = [h for h in my if my[h] > 0]
     owned = None
-    mine = [(t[0], t[1], t[2]) for t in tris if t[3] == 0]
-    if mine:
-        TARGET = mine[0] if TARGET is None or TARGET not in mine else TARGET
-        owned = TARGET
-    elif TARGET is None:
+    if TARGET:
+        info = next((t for t in tris if frozenset(t[:3]) == frozenset(TARGET)), None)
+        if info and info[3] == 0:
+            owned = TARGET
+        elif info and (info[3] != 0 or not info[4]):
+            TARGET = None
+    if owned is None and TARGET is None and unit_h:
         cand = [t for t in tris if t[4] and t[3] != 0] or [t for t in tris if t[3] != 0] or tris
-        t = min(cand, key=lambda x: sum(my.get(c, 0) for c in x[:3]))
+        t = min(
+            cand,
+            key=lambda x: (
+                reach_triangle(x[:3], unit_h),
+                -sum(1 for c in x[:3] if my.get(c, 0) > opp.get(c, 0)),
+                -sum(my.get(c, 0) for c in x[:3]),
+            ),
+        )
         TARGET = (t[0], t[1], t[2])
+    if TARGET is None:
+        print(";", flush=True)
+        continue
     corners = sorted(TARGET)
     corner_set = set(corners)
     units = []
@@ -48,9 +88,9 @@ while True:
         m, o = my[h], opp[h]
         if m > 0 and (o == 0 or m > o):
             units += [h] * (m - o if o else m)
+    units.sort(key=lambda h: (1 if h in corner_set and my[h] > opp[h] else 0, h))
     weak = [c for c in corners if my.get(c, 0) <= opp.get(c, 0)]
     held = owned and not weak
-    plan = {c: my.get(c, 0) for c in corners}
     cmds, used = [], {}
     for i, src in enumerate(units):
         lim = (my[src] - opp[src]) if opp[src] else my[src]
@@ -63,9 +103,11 @@ while True:
                 continue
             dst = weak[i % len(weak)]
         else:
-            dst = min(corners, key=lambda c: (plan[c], c))
-            plan[dst] += 1
+            need = weak or list(corners)
+            dst = need[i % len(need)]
             if src == dst:
+                continue
+            if src in corner_set and my[src] > opp[src]:
                 continue
         if src != dst:
             cmds.append(f"MOVE {src} {dst} 1")
