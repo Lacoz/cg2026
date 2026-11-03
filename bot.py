@@ -50,19 +50,21 @@ while True:
             units += [h] * (m - o if o else m)
     weak = [c for c in corners if my.get(c, 0) <= opp.get(c, 0)]
     held = owned and not weak
+    plan = {c: my.get(c, 0) for c in corners}
     cmds, used = [], {}
     for i, src in enumerate(units):
         lim = (my[src] - opp[src]) if opp[src] else my[src]
         if used.get(src, 0) >= lim:
             continue
-        if src in corner_set and my[src] > opp[src]:
+        if owned and src in corner_set and my[src] > opp[src]:
             continue
         if owned:
             if not weak:
                 continue
             dst = weak[i % len(weak)]
         else:
-            dst = corners[i % len(corners)]
+            dst = min(corners, key=lambda c: (plan[c], c))
+            plan[dst] += 1
             if src == dst:
                 continue
         if src != dst:
