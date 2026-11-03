@@ -220,13 +220,14 @@ while True:
     n_owned = len(owned_tris)
     n_frag = len(defend_list)
     mode = "HOLD" if owned_tris and not secure_hold else ("ATK" if TARGET else "IDLE")
-    t_label = "-"
-    if TARGET:
-        t_label = f"{atk_corners[0]}-{atk_corners[1]}-{atk_corners[2]}"
-    risk = "OK" if secure_hold or not owned_tris else "RISK"
-    status = (
-        f"MSG vojaci={army} moje_tri={n_owned} body={my_score} "
-        f"krehke_rohy={n_frag} {risk} rezim={mode} ciel={t_label}"
-    )
+    m = {"HOLD": "H", "ATK": "A", "IDLE": "I"}[mode]
+    r = "R" if owned_tris and not secure_hold else "O"
+    # UI message max ~20 znakov: v vojaci, t trojuholníky, f krehké rohy, r O/R, m H/A/I, c roh cieľa
+    ui = f"v={army} t={n_owned} f={n_frag} r={r} m={m}"
+    if TARGET and len(ui) <= 14:
+        ui += f" c={min(atk_corners)}"
+    if len(ui) > 20:
+        ui = f"v={army} t={n_owned} r={r} m={m}"[:20]
+    status = f"MSG {ui}"
     out = [status] + cmds
     print(";".join(out), flush=True)
