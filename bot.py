@@ -121,7 +121,7 @@ while True:
         elif info and (info[3] != 0 or not info[4]):
             TARGET = None
 
-    if TARGET is None and unit_h and (not owned_tris or secure_hold):
+    if TARGET is None and unit_h:
         cand = [t for t in tris if t[4] and t[3] != 0] or [t for t in tris if t[3] != 0] or tris
         atk_energy = 1.0
         t = min(
@@ -133,11 +133,7 @@ while True:
             ),
         )
         atk_energy = reach_triangle(t[:3], unit_h) + 1
-        hold_value = owned_area + len(owned_tris) * 50_000
-        if owned_tris and hold_value > atk_energy * 40_000:
-            TARGET = None
-        else:
-            TARGET = (t[0], t[1], t[2])
+        TARGET = (t[0], t[1], t[2])
 
     units = []
     for h in sorted(my):
@@ -145,14 +141,18 @@ while True:
         if m > 0 and (o == 0 or m > o):
             units += [h] * (m - o if o else m)
 
-    if owned_tris and army >= SPLIT_ARMY_AT:
-        hold_value = owned_area + len(defend_list) * 80_000
-        atk_e = reach_triangle(TARGET, unit_h) + 1 if TARGET else 50
-        def_frac = 0.72 + min(0.18, hold_value / (hold_value + atk_e * 35_000))
-        if not secure_hold:
+    if owned_tris and defend_list:
+        if army >= SPLIT_ARMY_AT:
+            hold_value = owned_area + len(defend_list) * 80_000
+            atk_e = reach_triangle(TARGET, unit_h) + 1 if TARGET else 50
+            def_frac = 0.72 + min(0.18, hold_value / (hold_value + atk_e * 35_000))
             def_frac = max(def_frac, 0.82)
-        n_def = min(len(units) - 1, max(int(len(units) * def_frac), len(defend_list) + len(owned_tris)))
+            n_def = min(len(units) - 1, max(int(len(units) * def_frac), len(defend_list)))
+        else:
+            n_def = max(1, len(units) - 1)
         def_units, atk_units = units[:n_def], units[n_def:]
+    elif owned_tris and secure_hold:
+        def_units, atk_units = [], units
     else:
         def_units, atk_units = [], units
 
@@ -172,27 +172,44 @@ while True:
             need = max(need, o + 1)
         return min(m, need)
 
-    def lim_src(src):
+    def primary_def():
+        return defend_list[0] if defend_list else None
+
+    def lim_src(src, dst=None):
         m, o = my[src], opp[src]
         if m <= 0 or (o > 0 and m <= o):
             return 0
         cap = m - o if o else m
+        pri = primary_def()
+        if pri and dst == pri and src in owned_corners and src != pri and m > o:
+            return 1
         if src in owned_corners:
             cap = max(0, min(cap, m - min_stay(src)))
         return cap
 
-    def can_leave_owned(src):
+    def can_leave_owned(src, dst=None):
         if src not in owned_corners:
             return True
-        return min_stay(src) < my[src]
+        m, o = my[src], opp[src]
+        if m <= o:
+            return False
+        pri = primary_def()
+        if dst is not None and pri and dst == pri and src != pri:
+            md = my.get(dst, 0) - opp.get(dst, 0)
+            if md <= m - o:
+                return True
+        if dst is not None and dst in defend_list:
+            if my.get(dst, 0) - opp.get(dst, 0) < m - o:
+                return True
+        return m > min_stay(src)
 
     for src in def_units:
-        if used.get(src, 0) >= lim_src(src) or not can_leave_owned(src):
-            continue
         if not defend_list:
             continue
         dst = min(defend_list, key=lambda c: (my.get(c, 0) - opp.get(c, 0), move_energy(src, c)))
         if src == dst:
+            continue
+        if used.get(src, 0) >= lim_src(src, dst) or not can_leave_owned(src, dst):
             continue
         cmds.append(f"MOVE {src} {dst} 1")
         used[src] = used.get(src, 0) + 1
@@ -201,10 +218,6 @@ while True:
     for i, src in enumerate(atk_units):
         if not TARGET:
             break
-        if used.get(src, 0) >= lim_src(src) or not can_leave_owned(src):
-            continue
-        if owned and src in atk_set and my[src] > opp[src]:
-            continue
         if owned:
             if not atk_weak:
                 continue
@@ -213,6 +226,10 @@ while True:
             dst = atk_corners[i % len(atk_corners)]
             if src == dst:
                 continue
+        if used.get(src, 0) >= lim_src(src, dst) or not can_leave_owned(src, dst):
+            continue
+        if owned and src in atk_set and my[src] > opp[src]:
+            continue
         if src != dst:
             cmds.append(f"MOVE {src} {dst} 1")
             used[src] = used.get(src, 0) + 1
