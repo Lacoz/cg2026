@@ -118,7 +118,7 @@ while True:
         info = next((t for t in tris if frozenset(t[:3]) == frozenset(TARGET)), None)
         if info and info[3] == 0:
             owned = TARGET
-        elif info and (info[3] != 0 or not info[4]):
+        elif info and (info[3] == 1 or not info[4]):
             TARGET = None
 
     if TARGET is None and unit_h:
@@ -138,28 +138,53 @@ while True:
     units = []
     for h in sorted(my):
         m, o = my[h], opp[h]
-        if m > 0 and (o == 0 or m > o):
-            units += [h] * (m - o if o else m)
+        if m <= 0 or o > m:
+            continue
+        cap = m - o if m > o else 1
+        units += [h] * cap
 
-    if owned_tris and defend_list:
-        if army >= SPLIT_ARMY_AT:
-            hold_value = owned_area + len(defend_list) * 80_000
-            atk_e = reach_triangle(TARGET, unit_h) + 1 if TARGET else 50
-            def_frac = 0.72 + min(0.18, hold_value / (hold_value + atk_e * 35_000))
-            def_frac = max(def_frac, 0.82)
-            n_def = min(len(units) - 1, max(int(len(units) * def_frac), len(defend_list)))
-        else:
-            n_def = max(1, len(units) - 1)
+    owned_fs = {frozenset(t) for t in owned_tris}
+
+    def pick_move_mission():
+        if TARGET and frozenset(TARGET) not in owned_fs:
+            weak = [c for c in TARGET if my.get(c, 0) <= opp.get(c, 0)]
+            return TARGET, weak if weak else list(TARGET)
+        cand = [t for t in tris if t[4] and frozenset(t[:3]) not in owned_fs]
+        if not cand:
+            cand = [t for t in tris if frozenset(t[:3]) not in owned_fs and t[3] != 0]
+        if not cand:
+            cand = [t for t in tris if t[3] != 0]
+        if not cand:
+            return None, []
+        t = min(
+            cand,
+            key=lambda x: (
+                reach_triangle(x[:3], unit_h),
+                -sum(1 for c in x[:3] if my.get(c, 0) > opp.get(c, 0)),
+                -sum(my.get(c, 0) for c in x[:3]),
+            ),
+        )
+        corners = (t[0], t[1], t[2])
+        need = [c for c in corners if my.get(c, 0) <= opp.get(c, 0)]
+        if not need:
+            need = list(corners)
+        return corners, need
+
+    move_tri, move_need = pick_move_mission()
+    atk_corners = sorted(move_tri) if move_tri else []
+    atk_set = set(atk_corners)
+    atk_weak = move_need
+    target_held = owned and TARGET and not [c for c in TARGET if my.get(c, 0) <= opp.get(c, 0)]
+
+    if army >= SPLIT_ARMY_AT and owned_tris and defend_list:
+        hold_value = owned_area + len(defend_list) * 80_000
+        atk_e = reach_triangle(move_tri, unit_h) + 1 if move_tri else 50
+        def_frac = 0.72 + min(0.18, hold_value / (hold_value + atk_e * 35_000))
+        def_frac = max(def_frac, 0.82)
+        n_def = min(len(units) - 1, max(int(len(units) * def_frac), len(defend_list)))
         def_units, atk_units = units[:n_def], units[n_def:]
-    elif owned_tris and secure_hold:
-        def_units, atk_units = [], units
     else:
         def_units, atk_units = [], units
-
-    atk_corners = sorted(TARGET) if TARGET else []
-    atk_set = set(atk_corners)
-    atk_weak = [c for c in atk_corners if my.get(c, 0) <= opp.get(c, 0)] if TARGET else []
-    target_held = owned and not atk_weak
 
     cmds, used = [], {}
 
@@ -177,22 +202,31 @@ while True:
 
     def lim_src(src, dst=None):
         m, o = my[src], opp[src]
-        if m <= 0 or (o > 0 and m <= o):
+        if m <= 0 or o > m:
             return 0
-        cap = m - o if o else m
+        if m == o:
+            return 1
+        cap = m - o
         pri = primary_def()
         if pri and dst == pri and src in owned_corners and src != pri and m > o:
             return 1
         if src in owned_corners:
-            cap = max(0, min(cap, m - min_stay(src)))
+            if dst is not None and dst not in owned_corners:
+                cap = max(cap, 1 if m >= 1 and o <= m else 0)
+            else:
+                cap = max(0, min(cap, m - min_stay(src)))
         return cap
 
     def can_leave_owned(src, dst=None):
         if src not in owned_corners:
             return True
         m, o = my[src], opp[src]
-        if m <= o:
+        if m < o:
             return False
+        if dst is not None and dst not in owned_corners and m >= 1 and o <= m:
+            return True
+        if m == o:
+            return bool(dst and (dst not in owned_corners or dst in defend_list))
         pri = primary_def()
         if dst is not None and pri and dst == pri and src != pri:
             md = my.get(dst, 0) - opp.get(dst, 0)
@@ -240,25 +274,29 @@ while True:
         cmds.append(f"MOVE {src} {dst} 1")
         used[src] = used.get(src, 0) + 1
 
-    atk_units.sort(key=lambda h: (1 if h in owned_corners else 0, h))
-    for i, src in enumerate(atk_units):
-        if not TARGET:
+    atk_pool = sorted(set(units), key=lambda h: (1 if h in owned_corners else 0, h))
+    for i, src in enumerate(atk_pool):
+        if not move_tri or not atk_weak:
             break
-        if owned:
-            if not atk_weak:
-                continue
-            dst = min(atk_weak, key=lambda c: move_energy(src, c))
+        away = [c for c in atk_corners if c != src]
+        if not away:
+            continue
+        if frozenset(move_tri) not in owned_fs:
+            dst = away[i % len(away)]
         else:
-            dst = atk_corners[i % len(atk_corners)]
-            if src == dst:
-                continue
+            need = [c for c in atk_weak if c != src] or away
+            dst = min(need, key=lambda c: move_energy(src, c))
         if used.get(src, 0) >= lim_src(src, dst) or not can_leave_owned(src, dst):
             continue
-        if owned and src in atk_set and my[src] > opp[src]:
+        if (
+            frozenset(move_tri) in owned_fs
+            and src in atk_set
+            and my[src] > opp[src]
+            and dst in atk_set
+        ):
             continue
-        if src != dst:
-            cmds.append(f"MOVE {src} {dst} 1")
-            used[src] = used.get(src, 0) + 1
+        cmds.append(f"MOVE {src} {dst} 1")
+        used[src] = used.get(src, 0) + 1
 
     spawn_ready = False
     if owned_tris:
@@ -287,7 +325,7 @@ while True:
         ui += " s=1"
     elif owned_tris and len(ui) <= 17:
         ui += " s=0"
-    if TARGET and len(ui) <= 14:
+    if move_tri and len(ui) <= 14:
         ui += f" c={min(atk_corners)}"
     if len(ui) > 20:
         ui = f"v={army} t={n_owned} r={r} m={m}"[:20]
