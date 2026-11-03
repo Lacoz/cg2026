@@ -3,6 +3,7 @@ import math
 from collections import deque
 
 TARGET = None
+SPLIT_ARMY_AT = 6  # od tohto počtu jednotiek polovica bráni, polovica útočí
 houses = {}
 adj = {}
 
@@ -58,8 +59,19 @@ while True:
     for i in range(linkable_count):
         house1, house2 = [int(j) for j in input().split()]
 
-    # --- obsad → drž → spawn ---
+    # --- obrana získaných | útok na TARGET | spawn ---
     unit_h = [h for h in my if my[h] > 0]
+    army = sum(my.values())
+    owned_tris = [(t[0], t[1], t[2]) for t in tris if t[3] == 0]
+    owned_corners = set()
+    defend_weak = []
+    for a, b, c in owned_tris:
+        for corner in (a, b, c):
+            owned_corners.add(corner)
+            if my.get(corner, 0) <= opp.get(corner, 0):
+                defend_weak.append(corner)
+    defend_weak.sort(key=lambda c: (my.get(c, 0) - opp.get(c, 0), c))
+
     owned = None
     if TARGET:
         info = next((t for t in tris if frozenset(t[:3]) == frozenset(TARGET)), None)
@@ -67,7 +79,7 @@ while True:
             owned = TARGET
         elif info and (info[3] != 0 or not info[4]):
             TARGET = None
-    if owned is None and TARGET is None and unit_h:
+    if TARGET is None and unit_h:
         cand = [t for t in tris if t[4] and t[3] != 0] or [t for t in tris if t[3] != 0] or tris
         t = min(
             cand,
@@ -78,42 +90,86 @@ while True:
             ),
         )
         TARGET = (t[0], t[1], t[2])
-    if TARGET is None:
-        print(";", flush=True)
-        continue
-    corners = sorted(TARGET)
-    corner_set = set(corners)
+
     units = []
     for h in sorted(my):
         m, o = my[h], opp[h]
         if m > 0 and (o == 0 or m > o):
             units += [h] * (m - o if o else m)
-    units.sort(key=lambda h: (1 if h in corner_set and my[h] > opp[h] else 0, h))
-    weak = [c for c in corners if my.get(c, 0) <= opp.get(c, 0)]
-    held = owned and not weak
+    if army >= SPLIT_ARMY_AT and owned_tris:
+        half = len(units) // 2
+        def_units, atk_units = units[:half], units[half:]
+    else:
+        def_units, atk_units = [], units
+
+    atk_corners = sorted(TARGET) if TARGET else []
+    atk_set = set(atk_corners)
+    atk_weak = [c for c in atk_corners if my.get(c, 0) <= opp.get(c, 0)] if TARGET else []
+    target_held = owned and not atk_weak
+
     cmds, used = [], {}
-    for i, src in enumerate(units):
-        lim = (my[src] - opp[src]) if opp[src] else my[src]
-        if used.get(src, 0) >= lim:
+
+    def lim_src(src):
+        m, o = my[src], opp[src]
+        return (m - o) if o else m
+
+    def garrison(src, corner_set):
+        return (
+            src in corner_set
+            and my[src] > opp[src]
+            and my[src] <= opp[src] + 1
+        )
+
+    for i, src in enumerate(def_units):
+        if used.get(src, 0) >= lim_src(src):
             continue
-        if owned and src in corner_set and my[src] > opp[src]:
+        if garrison(src, owned_corners):
+            continue
+        if not defend_weak:
+            continue
+        dst = defend_weak[i % len(defend_weak)]
+        if src == dst:
+            continue
+        cmds.append(f"MOVE {src} {dst} 1")
+        used[src] = used.get(src, 0) + 1
+
+    atk_units.sort(key=lambda h: (1 if garrison(h, owned_corners) else 0, h))
+    for i, src in enumerate(atk_units):
+        if not TARGET:
+            break
+        if used.get(src, 0) >= lim_src(src):
+            continue
+        if garrison(src, owned_corners):
+            continue
+        if owned and src in atk_set and my[src] > opp[src]:
             continue
         if owned:
-            if not weak:
+            if not atk_weak:
                 continue
-            dst = weak[i % len(weak)]
+            dst = atk_weak[i % len(atk_weak)]
         else:
-            dst = corners[i % len(corners)]
+            dst = atk_corners[i % len(atk_corners)]
             if src == dst:
                 continue
-            if src in corner_set and my[src] > opp[src] and my[src] <= opp[src] + 1:
+            if garrison(src, atk_set):
                 continue
         if src != dst:
             cmds.append(f"MOVE {src} {dst} 1")
             used[src] = used.get(src, 0) + 1
-    if held:
-        s = min(corners, key=lambda h: my[h])
-        r = [x for x in corners if x != s]
+
+    if target_held and TARGET:
+        s = min(atk_corners, key=lambda h: my[h])
+        r = [x for x in atk_corners if x != s]
         cmds.append(f"SPAWN {s} {r[0]} {r[1]}")
         TARGET = None
+    elif owned_tris:
+        for a, b, c in owned_tris:
+            if frozenset((a, b, c)) == frozenset(TARGET or ()):
+                continue
+            corners = (a, b, c)
+            if all(my.get(x, 0) > opp.get(x, 0) for x in corners):
+                s = min(corners, key=lambda h: my[h])
+                r = [x for x in corners if x != s]
+                cmds.append(f"SPAWN {s} {r[0]} {r[1]}")
+                break
     print(";".join(cmds) if cmds else ";", flush=True)
