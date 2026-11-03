@@ -103,11 +103,10 @@ while True:
                 continue
             dst = weak[i % len(weak)]
         else:
-            need = weak or list(corners)
-            dst = need[i % len(need)]
+            dst = corners[i % len(corners)]
             if src == dst:
                 continue
-            if src in corner_set and my[src] > opp[src]:
+            if src in corner_set and my[src] > opp[src] and my[src] <= opp[src] + 1:
                 continue
         if src != dst:
             cmds.append(f"MOVE {src} {dst} 1")

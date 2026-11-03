@@ -88,6 +88,18 @@ Priorita misie:
 - `ADD_PATH` / `REMOVE_PATH` — skratky na mape.
 - Simulácia 1 ťah dopredu pre `meCanCapture` po spawn.
 
+## Lokálny simulátor (bez CodinGame API)
+
+Referee logika (MOVE → SPAWN → surround → capture) je v `scripts/game_sim.py` podľa [TryAngle-Catch](https://github.com/eulerscheZahl/TryAngle-Catch).
+
+```bash
+./cg unittest                              # unit testy (seed 4034019036303909000, …)
+./cg sim --builtin-seed403401 --turns 15   # rollout jedného procesu bota
+python3 scripts/sim_turn.py --seed-file opts.txt --turns 20
+```
+
+**Dôležité:** `MOVE A B 1` = **jeden krok** po najkratšej ceste (napr. `14→3` môže ísť cez `33`). Bot musí mať **jeden proces na hru** (`TARGET` sa pamätá).
+
 ## Feedback loop (test → gate → submit)
 
 Lokálny workflow pred submisou na CodinGame:

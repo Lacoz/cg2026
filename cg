@@ -30,6 +30,12 @@ cfg=yaml.safe_load(open('scoring.yaml'))
 print(limits(cfg['challenge']))
 "
     ;;
+  sim)
+    exec python3 scripts/sim_turn.py "$@"
+    ;;
+  unittest|unit)
+    exec python3 -m unittest discover -s tests -p 'test_*.py' -v
+    ;;
   help|*)
     cat <<EOF
 Usage: ./cg <command>
@@ -39,6 +45,8 @@ Usage: ./cg <command>
   weak [--arena]            Slabé hry: seed, game_id, príkaz replay + WEAK.md
   replay [--ide]            Online replay podľa --seed / --game-id / --from-run
   local [bot.py]            Build & run TryAngle referee + viewer (needs mvn, java)
+  sim [--builtin-seed403401]  Lokálny rollout (scripts/sim_turn.py)
+  unittest                  Lokálne testy simulátora + botu (bez CodinGame API)
   limits                    Show API test-game rate limits
 
 Examples:
