@@ -113,6 +113,27 @@ while True:
         total = sum(my.get(x, 0) for x in corners)
         return total >= 4 and max(my.get(x, 0) for x in corners) >= 2
 
+    def tri_attack_ready(a, b, c):
+        return all(my.get(x, 0) >= 1 for x in (a, b, c))
+
+    def pick_attack():
+        best = None
+        for a, b, c, owner, _, _ in tris:
+            if owner != 0 or not tri_attack_ready(a, b, c):
+                continue
+            corners = (a, b, c)
+            for corner in corners:
+                for nb in adj.get(corner, ()):
+                    o = opp.get(nb, 0)
+                    if o <= 0:
+                        continue
+                    if my.get(nb, 0) >= o:
+                        continue
+                    score = (o - my.get(nb, 0), move_energy(corner, nb))
+                    if best is None or score > best[0]:
+                        best = (score, (a, b, c), nb)
+        return best[1:] if best else (None, None)
+
     owned = None
     if TARGET:
         info = next((t for t in tris if frozenset(t[:3]) == frozenset(TARGET)), None)
@@ -187,6 +208,10 @@ while True:
         def_units, atk_units = [], units
 
     cmds, used = [], {}
+    attack_tri, attack_target = pick_attack()
+    if attack_tri and attack_target:
+        a, b, c = attack_tri
+        cmds.append(f"ATTACK {a} {b} {c} {attack_target}")
 
     def min_stay(h):
         m, o = my[h], opp[h]
@@ -298,16 +323,27 @@ while True:
         cmds.append(f"MOVE {src} {dst} 1")
         used[src] = used.get(src, 0) + 1
 
+    attacked_fs = frozenset(attack_tri) if attack_tri else None
     spawn_ready = False
     if owned_tris:
-        if target_held and TARGET and tri_spawn_ready(*TARGET):
+        if (
+            target_held
+            and TARGET
+            and frozenset(TARGET) != attacked_fs
+            and tri_spawn_ready(*TARGET)
+        ):
             spawn_ready = True
-            s = min(atk_corners, key=lambda h: my[h])
-            r = [x for x in atk_corners if x != s]
+            tc = sorted(TARGET)
+            s = min(tc, key=lambda h: my[h])
+            r = [x for x in tc if x != s]
             cmds.append(f"SPAWN {s} {r[0]} {r[1]}")
             TARGET = None
         else:
-            ready = [t for t in owned_tris if tri_spawn_ready(*t)]
+            ready = [
+                t
+                for t in owned_tris
+                if frozenset(t) != attacked_fs and tri_spawn_ready(*t)
+            ]
             if ready:
                 spawn_ready = True
                 a, b, c = max(ready, key=lambda t: tri_area(*t))

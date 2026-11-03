@@ -70,6 +70,20 @@ nodes=500,500_600,400_600,600_700,500_800,300_800,500"""
             "expected spawn growth or score from holding captured tri",
         )
 
+    def test_attack_clears_opponent_on_neighbor(self):
+        opts = """seed=1
+units=1,0_1,0_1,0_0,1
+edges=0,1_1,2_0,2_2,3
+nodes=0,0_100,0_50,100_300,0"""
+        b = Board.from_game_options(opts)
+        tri = next(t for t in b.triangles if t.has_node(0) and t.has_node(1) and t.has_node(2))
+        tri.owner = 0
+        tri.initial_owner = 0
+        b.units[3][1] = 2
+        b.play_turn("ATTACK 0 1 2 3", "")
+        self.assertEqual(b.units[3][1], 0)
+        self.assertIsNone(tri.owner)
+
     def test_contested_allows_move_in_referee(self):
         opts = """seed=1
 units=1,1_0,0_0,0

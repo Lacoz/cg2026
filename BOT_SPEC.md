@@ -4,7 +4,7 @@
 
 - **Body:** +1 za každý **tvoj** trojuholník na konci ťahu (maximálne držať obsadené).
 - **Výhra:** viac bodov, alebo ≥80 % trojuholníkov, alebo súper bez jednotiek/trojuholníkov.
-- **Bronze (aktuálne):** príkazy `MOVE`, `SPAWN` (cesty `ADD_PATH` / `ATTACK` až vyššie ligy).
+- **Wood 1 (aktuálne):** príkazy `ATTACK`, `MOVE`, `SPAWN`. `ADD_PATH` / `REMOVE_PATH` až vyššie ligy.
 
 ## Prečo „stále len 3 vojaci“
 
@@ -19,12 +19,15 @@
 
 ## Fázy ťahu (referee)
 
-1. Všetky **MOVE** (priorita 1, viacero snímok v rámci ťahu).
-2. Všetky **SPAWN** (priorita 2).
-3. Zabitie **obklčených** jednotiek.
-4. **Obsadenie** trojuholníkov (vlastníctvo rohov).
+1. **ATTACK** (priorita 0, max 1 útok hráča na „snímku“; cost **1** na každom rohu tri).
+2. **MOVE** (priorita 1, viac príkazov naraz).
+3. **SPAWN** (priorita 2, cost **0**).
+4. Zabitie **obklčených** jednotiek.
+5. **Obsadenie** trojuholníkov + body.
 
-Výstup: `MOVE …;MOVE …;SPAWN …` (poradie v reťazci nevadí, fázy sú pevné).
+Útok beží **pred** pohybom — plánuj ho podľa stavu **na začiatku ťahu** (`remainingUnits`). Použitie tri ho **zneutrálí** (ako spawn). Cieľ útoku musí **susediť** s tri.
+
+Výstup: `ATTACK …;MOVE …;SPAWN …` (referee zoradí podľa fáz; v jednom reťazci môžeš mix).
 
 ## Vlastníctvo domu (zjednodušene)
 
@@ -84,13 +87,20 @@ Priorita misie:
 
 ## Known gaps (TODO vyššie ligy)
 
-- `ATTACK` — zničiť jednotky na susednom dome cez trojuholník.
 - `ADD_PATH` / `REMOVE_PATH` — skratky na mape.
-- Simulácia 1 ťah dopredu pre `meCanCapture` po spawn.
+- Simulátor: viacnásobné ATTACK vlny v jednom ťahu (referee robí viac snímok).
+- Simulácia 1 ťah dopredu pre `meCanCapture` po spawn/attack.
+
+## Wood 1 — ATTACK (implementácia v `bot.py`)
+
+- Hľadá **náš** trojuholník (`owner == 0`) s **≥1** jednotkou na **každom** rohu (cost 1).
+- Cieľ: susedný dom s `opp > my` — zmaže všetky jednotky súpera (referee).
+- Jedna `ATTACK` na ťah ak existuje dobrý cieľ; potom MOVE/SPAWN ako doteraz.
+- Po útoku tri nie je náš → znova capture pred ďalším spawnom.
 
 ## Lokálny simulátor (bez CodinGame API)
 
-Referee logika (MOVE → SPAWN → surround → capture) je v `scripts/game_sim.py` podľa [TryAngle-Catch](https://github.com/eulerscheZahl/TryAngle-Catch).
+Referee logika (ATTACK → MOVE → SPAWN → surround → capture) je v `scripts/game_sim.py` podľa [TryAngle-Catch](https://github.com/eulerscheZahl/TryAngle-Catch).
 
 ```bash
 ./cg unittest                              # unit testy (seed 4034019036303909000, …)
@@ -106,7 +116,7 @@ python3 scripts/sim_turn.py --seed-file opts.txt --turns 20
 
 - **Plocha** trojuholníka z `(x,y)` rohov → väčší = vyššia priorita obrany.
 - **Energia pohybu** ≈ `kroky_BFS × 80 + euklid_vzdialenosť × 0.15` — obranné jednotky idú na najbližší kritický roh.
-- **`hold_value`** = súčet plôch našich trojuholníkov; nový `TARGET` len ak `secure_hold` (všetky rohy `my > opp+1`) alebo hold nie je drahší než útok.
+- **`TARGET`**: neutrálny tri (`owner == -1`) sa **nemá** mýliť s prehrou — reset len pri `owner == 1` alebo `meCanCapture == 0`.
 - **`SPLIT_ARMY_AT = 8`**: pri držaných trojuholníkoch **72–90 %** pohyblivých jednotiek na obranu; ak je niečo krehké (`my ≤ opp+1`), min. **82 %**.
 - **Garrison**: malý trojuholník = 1 jednotka na rohu, veľký (`area ≥ 120k`) = **2**; pri súperovi `max(2, opp+1)`.
 - **Spawn** len keď `f=0` (`secure_hold`) a **na každom rohu** daného trojuholníka `my ≥ opp+2` (pri súperovi/susedovi s jednotkou tiež `opp+2`). UI: `s=1` / `s=0`.

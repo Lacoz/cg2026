@@ -1,10 +1,10 @@
 ![Wood League](//cdn.codingame.com/smash-the-code/statement/league_wood_04.png)
 
-This is a **league-based** challenge.
+Welcome to the **Wood 1** league!
 
-Wood leagues should be considered as a tutorial which lets players discover the different rules of the game.
-In Bronze league all rules will be unlocked and the real challenge will begin.
-To have a look at the final rules, go [here](https://www.codingame.com/ide/demo/843364c35de5a48f4e0de3a6e0720b74d11b1a) and switch leagues at the top right corner.
+In Wood 1 you can now **ATTACK** houses. To have a look at the final rules, go [here](https://www.codingame.com/ide/demo/843364c35de5a48f4e0de3a6e0720b74d11b1a) and switch leagues at the top right corner.
+
+This is a **league-based** challenge. Wood leagues are a tutorial that introduces rules step by step; higher leagues unlock more commands.
 
 # The Goal
 
@@ -33,8 +33,13 @@ To capture a triangle, a player has to own all three corners of it and be eligib
 **Using a triangle**
 When owning a triangle, a player can use it to perform one of the actions described below. This will make the triangle neutral again. The player using it can only capture it again after moving all units away from each house or after it got captured by the opponent player.
 
+Some usages have an additional **cost**, meaning that the player loses a certain amount of units on **each house** of the triangle. If the player doesn't have enough units on each house, the triangle can't be used. In order to use a triangle, a unit must have been on that corner for the whole turn and not just moved or spawned there (checked via `remainingUnits` at action time).
+
 **Spawning a unit**
-One way to use a triangle is to spawn a unit. This will place a unit on one house of the triangle. The player can choose the corner to spawn on.
+One way to use a triangle is to spawn a unit. This will place a unit on one house of the triangle. The player can choose the corner to spawn on. **Spawning has no cost.**
+
+**Attacking a house**
+A triangle can be used to attack a house, killing **all** opponent units on it. This action has a **cost of 1** (one of your units removed on each corner of the triangle). The attacked house has to be **adjacent** to at least one house of the used triangle.
 
 ### Victory Conditions
 
@@ -55,10 +60,15 @@ Don't hesitate to change the viewer's options to help debug your code (![](https
 
 The game turn works as follows:
 
-1. Move units
-2. Spawn units
-3. Kill surrounded units
-4. Change ownership of triangles
+1. Apply **attack** actions
+2. Move units
+3. Spawn units
+4. Kill surrounded units
+5. Change ownership of triangles
+
+Within the same type of action, actions are applied for both players simultaneously, but sequentially for the same player.
+
+Example: Player 1 wants to perform two attack actions A1a and A1b. Player 2 wants to perform two attack actions A2a and A2b. First A1a and A2a will be checked for being valid (the triangles in use are owned by the respective players and they have enough units on each house) and applied if possible. Then A1b and A2b will be processed in the same way. It's possible that the first pair of actions renders one of the later ones invalid by killing units on a triangle that was supposed to be used later.
 
 ## Game Input
 
@@ -89,6 +99,7 @@ You can print an arbitrary amount of commands per turn, separated by `;`
 
 - `MOVE from to amount` move `amount` units from house `from` to house `to`. If there is no direct connection between these two houses, the units will move closer along a shortest path if possible or stay if there is no path.
 - `SPAWN house1 house2 house3` to spawn a unit on `house1` using the given triangle. Change the house order to affect the spawning location
+- `ATTACK house1 house2 house3 target` attack the `target` house using the given triangle (cost `1` per corner; target must neighbor the triangle)
 
 ### Constraints
 

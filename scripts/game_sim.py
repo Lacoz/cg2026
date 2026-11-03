@@ -1,6 +1,7 @@
 """
-Minimal TryAngle Catch referee (Bronze: MOVE + SPAWN) for local bot tests.
-Logic aligned with github.com/eulerscheZahl/TryAngle-Catch (Node, Triangle, Board).
+Minimal TryAngle Catch referee (Wood 1+: ATTACK, MOVE, SPAWN) for local bot tests.
+Turn phases: ATTACK → MOVE → SPAWN → surround → capture (see statement.md).
+Logic aligned with github.com/eulerscheZahl/TryAngle-Catch.
 """
 from __future__ import annotations
 
@@ -60,19 +61,23 @@ class Triangle:
                 self.owner = pid
         return self.owner != old
 
-    def can_use(self, pid: int, remaining: Dict[int, List[int]]) -> bool:
+    def can_use(self, pid: int, remaining: Dict[int, List[int]], cost: int = 0) -> bool:
         if self.owner != pid or self.initial_owner != pid:
             return False
-        return all(remaining[n][pid] >= 0 for n in self.corners())
+        return all(remaining[n][pid] >= cost for n in self.corners())
 
-    def use_spawn(self, pid: int, spawn_node: int, units: Dict[int, List[int]], remaining: Dict[int, List[int]]) -> None:
+    def use_triangle(self, pid: int, cost: int, units: Dict[int, List[int]], remaining: Dict[int, List[int]]) -> None:
         for n in self.corners():
-            take = min(0, units[n][pid])  # use(0) in referee
+            take = min(cost, units[n][pid])
             units[n][pid] -= take
             remaining[n][pid] -= take
         self.can_capture[pid] = False
         self.owner = None
+
+    def use_spawn(self, pid: int, spawn_node: int, units: Dict[int, List[int]], remaining: Dict[int, List[int]]) -> None:
+        self.use_triangle(pid, 0, units, remaining)
         units[spawn_node][pid] += 1
+        remaining[spawn_node][pid] += 1
 
 
 @dataclass
@@ -167,25 +172,55 @@ class Board:
             (t for t in self.triangles if t.has_node(spawn) and t.has_node(n2) and t.has_node(n3)),
             None,
         )
-        if tri is None or not tri.can_use(pid, self.remaining):
+        if tri is None or not tri.can_use(pid, self.remaining, 0):
             return False
         tri.use_spawn(pid, spawn, self.units, self.remaining)
         return True
+
+    def apply_attack(self, pid: int, a: int, b: int, c: int, target: int) -> bool:
+        tri = next(
+            (t for t in self.triangles if t.has_node(a) and t.has_node(b) and t.has_node(c)),
+            None,
+        )
+        if tri is None or tri.owner != pid:
+            return False
+        if not tri.can_use(pid, self.remaining, 1):
+            return False
+        corners = set(tri.corners())
+        if not any(target in self.adj.get(n, ()) for n in corners):
+            return False
+        opp = 1 - pid
+        if self.units[target][opp] <= 0:
+            return False
+        tri.use_triangle(pid, 1, self.units, self.remaining)
+        self.units[target][opp] = 0
+        self.remaining[target][opp] = 0
+        return True
+
+    @staticmethod
+    def _split_commands(line: str):
+        attacks, moves, spawns = [], [], []
+        for cmd in line.split(";"):
+            cmd = cmd.strip()
+            if not cmd or cmd.upper().startswith("MSG"):
+                continue
+            parts = cmd.split()
+            if not parts:
+                continue
+            key = parts[0].upper()
+            if key == "MOVE" and len(parts) == 4:
+                moves.append((int(parts[1]), int(parts[2]), int(parts[3])))
+            elif key == "SPAWN" and len(parts) == 4:
+                spawns.append((int(parts[1]), int(parts[2]), int(parts[3])))
+            elif key == "ATTACK" and len(parts) == 5:
+                attacks.append((int(parts[1]), int(parts[2]), int(parts[3]), int(parts[4])))
+        return attacks, moves, spawns
 
     def parse_commands(self, pid: int, line: str) -> None:
         line = line.strip()
         if not line or line == ";":
             return
-        moves, spawns = [], []
-        for cmd in line.split(";"):
-            cmd = cmd.strip()
-            if not cmd:
-                continue
-            parts = cmd.split()
-            if parts[0].upper() == "MOVE" and len(parts) == 4:
-                moves.append((int(parts[1]), int(parts[2]), int(parts[3])))
-            elif parts[0].upper() == "SPAWN" and len(parts) == 4:
-                spawns.append((int(parts[1]), int(parts[2]), int(parts[3])))
+        _, moves, spawns = self._split_commands(line)
         for src, dst, amt in moves:
             self.apply_move(pid, src, dst, amt)
         for sp in spawns:
@@ -238,8 +273,20 @@ class Board:
         self.reset_remaining()
         for t in self.triangles:
             t.initial_owner = t.owner
-        self.parse_commands(0, cmd_p0)
-        self.parse_commands(1, cmd_p1)
+        atk0, move0, spawn0 = self._split_commands(cmd_p0)
+        atk1, move1, spawn1 = self._split_commands(cmd_p1)
+        for a in atk0:
+            self.apply_attack(0, *a)
+        for a in atk1:
+            self.apply_attack(1, *a)
+        for src, dst, amt in move0:
+            self.apply_move(0, src, dst, amt)
+        for src, dst, amt in move1:
+            self.apply_move(1, src, dst, amt)
+        for sp in spawn0:
+            self.apply_spawn(0, *sp)
+        for sp in spawn1:
+            self.apply_spawn(1, *sp)
         self.end_turn()
 
     def bot_input(self, pid: int = 0) -> str:
