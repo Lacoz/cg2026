@@ -1,3 +1,4 @@
+import random
 import sys
 import time
 from collections import deque
@@ -46,6 +47,8 @@ P = {
     "CAP_ADD": 8,
     "CAP_MAX": 80,
     "BUDGET": 0.022,
+    "ILS": 1,  # spend leftover budget on random kicks + re-descent
+    "KICK": 2,  # max tokens moved by one kick
 }
 
 
@@ -468,57 +471,81 @@ while True:
             return -FWI * d if d < 99 else 0.0
         return 0.0
 
-    def owner_of(x):
-        ns = nb[x]
-        if all(cnt[n] > op[n] for n in ns):
-            return 0
-        if all(op[n] > cnt[n] for n in ns):
-            return 1
-        if cnt[x] > op[x]:
-            return 0
-        if op[x] > cnt[x]:
-            return 1
-        return -1
+    use_dng = EXP != 0 or EXP2 != 0
+    use_surr = SURR != 0
 
-    def house_term(x):
+    # nmine[x] / nopp[x]: neighbours of x where we / the enemy have strictly more units
+    deg = [len(nb[x]) for x in range(N)]
+    nmine = [0] * N
+    nopp = [0] * N
+    for h in range(N):
+        if cnt[h] != op[h]:
+            arr = nmine if cnt[h] > op[h] else nopp
+            for x in nb[h]:
+                arr[x] += 1
+
+    def bump(h, dv):
+        d0 = cnt[h] - op[h]
+        cnt[h] += dv
+        d1 = d0 + dv
+        if d0 > 0:
+            if d1 <= 0:
+                for x in nb[h]:
+                    nmine[x] -= 1
+        elif d0 < 0:
+            if d1 >= 0:
+                for x in nb[h]:
+                    nopp[x] -= 1
+        if d1 > 0:
+            if d0 <= 0:
+                for x in nb[h]:
+                    nmine[x] += 1
+        elif d1 < 0:
+            if d0 >= 0:
+                for x in nb[h]:
+                    nopp[x] += 1
+
+    def house_eval(x):
+        """(owner of house x, value of its units) for the current cnt."""
         c = cnt[x]
         o = op[x]
+        allmine = nmine[x] == deg[x]
+        allop = nopp[x] == deg[x]
+        ow = 0 if allmine else 1 if allop else 0 if c > o else 1 if o > c else -1
         v = 0.0
-        ns = nb[x]
         if c > 0:
-            if all(op[n] > cnt[n] for n in ns):
+            if allop:
                 v -= WU * c
             else:
-                if c >= 2 and danger[x] > 0:
+                if use_dng and c >= 2 and danger[x] > 0:
                     v -= danger[x] * (EXP * c if c >= 3 else EXP2 * c)
-                if all(oreach[n] > cnt[n] for n in ns):
+                if use_surr and all(oreach[n] > cnt[n] for n in nb[x]):
                     v -= SURR * c
-                if risk[x] > 0 and c > RISK_NET:
+                if c > RISK_NET and risk[x] > 0:
                     v -= RISK * (c - RISK_NET) * pk[c if c < 5 else 5] * risk[x]
-                need = o + 1
-                if c > need:
-                    s = c - need
+                if c > o + 1:
+                    s = c - o - 1
                     v -= SPR * s * s
-        if o > 0 and all(cnt[n] > op[n] for n in ns):
+        if o > 0 and allmine:
             v += WK * o
-        return v
+        return ow, v
+
+    tri_st = []
+    for i in range(T):
+        so, sm = (-1, False) if used[i] else (owner[i], mecap[i])
+        tri_st.append(tri_c[i] + (so, sm, used[i], so == -1 and opcap[i], tw[i]))
 
     def tri_term(i, own):
-        return tri_term0(i, own) * tw[i]
-
-    def tri_term0(i, own):
-        a, b, c = tri_c[i]
-        oa, ob, oc = own[a], own[b], own[c]
-        if used[i]:
-            so, sm = -1, False
-        else:
-            so, sm = owner[i], mecap[i]
+        a, b, c, so, sm, usd, oppc, w = tri_st[i]
+        oa = own[a]
+        ob = own[b]
+        oc = own[c]
         if so == 0:
             if oa == 1 and ob == 1 and oc == 1:
-                return -V_LOSE
+                return -V_LOSE * w
             if oa != 0 and ob != 0 and oc != 0 and oreach[a] > cnt[a] and oreach[b] > cnt[b] and oreach[c] > cnt[c]:
-                return -THREAT
-            return 0.0
+                return -THREAT * w
+            return 0.0 * w
         v = 0.0
         if sm:
             mine = (oa == 0) + (ob == 0) + (oc == 0)
@@ -527,23 +554,25 @@ while True:
                 for x in (a, b, c):
                     if oadj[x] > 0 and cnt[x] - op[x] <= oadj[x]:
                         v *= P_CONT
-                return v
+                return v * w
             v += V_PART * mine
-        elif not used[i]:
+        elif not usd:
             e = (cnt[a] == 0) + (cnt[b] == 0) + (cnt[c] == 0)
             v += V_RESET if e == 3 else V_RPART * e
-        if so == -1 and opcap[i] and oa == 1 and ob == 1 and oc == 1:
+        if oppc and oa == 1 and ob == 1 and oc == 1:
             v -= V_OPPCAP
-        return v
+        return v * w
 
-    own = [owner_of(x) for x in range(N)]
-    hv = [house_term(x) for x in range(N)]
+    own = [0] * N
+    hv = [0.0] * N
+    for x in range(N):
+        own[x], hv[x] = house_eval(x)
     tv = [tri_term(i, own) for i in range(T)]
 
     def affected(houses):
         if len(houses) == 2:
             p, qq = houses
-            key = p * 64 + qq
+            key = p * N + qq
             r = pair_cache.get(key)
             if r is None:
                 r = (sorted(set(aff_h[p]) | set(aff_h[qq])), sorted(set(aff_t[p]) | set(aff_t[qq])))
@@ -572,35 +601,38 @@ while True:
         for i in TS:
             before += tv[i]
         for k, qq in mv:
-            cnt[tok_pos[k]] -= 1
-            cnt[qq] += 1
-        own2 = own[:]
-        for x in H:
-            own2[x] = owner_of(x)
+            bump(tok_pos[k], -1)
+            bump(qq, 1)
+        own0 = [own[x] for x in H]
         after = 0.0
+        no = []
         nh = []
         for x in H:
-            v = house_term(x)
+            o_, v = house_eval(x)
+            own[x] = o_
+            no.append(o_)
             nh.append(v)
             after += v
         nt = []
         for i in TS:
-            v = tri_term(i, own2)
+            v = tri_term(i, own)
             nt.append(v)
             after += v
+        for x, o_ in zip(H, own0):
+            own[x] = o_
         for k, qq in mv:
-            cnt[tok_pos[k]] += 1
-            cnt[qq] -= 1
-        return after - before + dtok, (H, TS, own2, nh, nt)
+            bump(tok_pos[k], 1)
+            bump(qq, -1)
+        return after - before + dtok, (H, TS, no, nh, nt)
 
     def commit(mv, state):
-        H, TS, own2, nh, nt = state
+        H, TS, no, nh, nt = state
         for k, qq in mv:
-            cnt[tok_pos[k]] -= 1
-            cnt[qq] += 1
+            bump(tok_pos[k], -1)
+            bump(qq, 1)
             tok_pos[k] = qq
         for j, x in enumerate(H):
-            own[x] = own2[x]
+            own[x] = no[j]
             hv[x] = nh[j]
         for j, i in enumerate(TS):
             tv[i] = nt[j]
@@ -745,6 +777,36 @@ while True:
         b = composite_pass()
         if not a and not b:
             break
+
+    # rest of the budget: kick 1..KICK random tokens, descend again, keep only if the total improved
+    kicks = kept = 0
+    if P["ILS"] and ntok and passes < 8:
+        rng = random.Random(turn)
+
+        def total():
+            return sum(hv) + sum(tv) + sum(tok_val(k, tok_pos[k]) for k in range(ntok))
+
+        best_v = total()
+        while time.perf_counter() - t_start < budget:
+            kicks += 1
+            snap = (tok_pos[:], cnt[:], own[:], hv[:], tv[:], nmine[:], nopp[:])
+            for _ in range(rng.randint(1, P["KICK"])):
+                k = rng.randrange(ntok)
+                opts = [x for x in tok_opts[k] if x != tok_pos[k]]
+                if opts:
+                    mv = [(k, rng.choice(opts))]
+                    commit(mv, eval_moves(mv)[1])
+            for _ in range(8):
+                a = single_pass()
+                b = composite_pass()
+                if not a and not b:
+                    break
+            v = total()
+            if v > best_v + 1e-6:
+                best_v = v
+                kept += 1
+            else:
+                tok_pos[:], cnt[:], own[:], hv[:], tv[:], nmine[:], nopp[:] = snap
 
     # ---------------- output ----------------
     # two spawns on one house would both die to a single ATTACK

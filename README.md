@@ -58,7 +58,17 @@ Input neobsahuje akcie súpera, bot ich odvodzuje z rozdielu stavov medzi ťahmi
   (držané × keep, dobyteľné × capture × `RISK_CAPW`). Penalta = `RISK`·WU·(c − `RISK_NET`)·P(útok|c)·riziko.
   `RISK_NET=3`: útok stojí súpera 3 jednotky + trojuholník, takže 2–3 stack obetovať je fér výmena —
   penalizujeme len čistú stratu (inak bot zamrzne, lokálne 16/198).
-- MSG ukazuje profil: `a0.09/0.49/0.49` = P(útok) pre stack 2/3/4, `k` keep rate, `c` capture aktivita, `x` počet útokov.
+- MSG ukazuje profil súpera, napr. `a.15/.32/.4 k.5 c.76 x0 12ms p3` (viewer zobrazí len ~20 znakov,
+  preto max 2 desatinné miesta bez úvodnej a koncových núl, profil súpera je vpredu):
+
+  | Pole | Význam |
+  |------|--------|
+  | `a.15/.32/.4` | P(súper ATTACKne), keď je náš najväčší stack v jeho dosahu 2 / 3 / 4 jednotky |
+  | `k` | keep rate: podiel súperových trojuholníkov, ktoré si udrží do ďalšieho ťahu (nespawnuje z nich) |
+  | `c` | capture aktivita: skutočné / predikované captures súpera (1 = podľa tabuľky, >1 agresívnejší) |
+  | `x` | počet doteraz detegovaných útokov súpera |
+  | `ms` | čas nášho ťahu v ms (limit 50, rozpočet `BUDGET` 22) |
+  | `p` | počet prechodov token local search v tomto ťahu (max 8) |
 
 Výsledok: nahradilo statickú `EXP` penaltu; lokálne 164/278 vs bez modelu, vs AdrienGI **WIN 95:−1**
 (game 916536436), `./cg test --games 2` 2/2 WIN (79:−1, 63:−1).
