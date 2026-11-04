@@ -63,6 +63,33 @@ Input neobsahuje akcie súpera, bot ich odvodzuje z rozdielu stavov medzi ťahmi
 Výsledok: nahradilo statickú `EXP` penaltu; lokálne 164/278 vs bez modelu, vs AdrienGI **WIN 95:−1**
 (game 916536436), `./cg test --games 2` 2/2 WIN (79:−1, 63:−1).
 
+### Prehra s Erickpi → obrana domova + hrozba z čerstvých captures (2026-11-04 13:40)
+
+Príčina prehry (game 916538767, 32:69, mapa symetrická): Erickpi v T13–19 natlačil 4–5 stacky do nášho
+domova (domy 10/14/39), SUR −4, zobral (14,25,42); naše jednotky medzitým v jeho domove. Potom 3× útok
+na naše 5-stacky na domácich hruboch. **100 % útokov súperov (Erickpi, AdrienGI, 35 útokov v 5 hrách)
+ide z trojuholníka dobytého v predošlom ťahu** — držané trojuholníky na útok nepoužívajú.
+
+Zmeny v `bot2.py`:
+- `HOME_W=0.6`: trojuholníky bližšie k nášmu štartu (max vzdialenosť rohov) majú ×1.6 hodnotu
+  (capture/strata/hrozba). Lokálne 170/280 vs bez toho.
+- `RISK_CAPW_ATT=1.0` (keď súper už aspoň raz zaútočil) a `RISK_NET=2`: plná váha hrozby z trojuholníkov,
+  ktoré súper môže tento ťah dobyť. Prediktor je kalibrovaný: pri predikovanom riziku ≥ 0.6 bolo
+  46 % našich ≥4 stackov napadnutých, pod 0.3 takmer nič.
+
+**Lokálne sa to javí horšie (113/280 vs bez), online je to jasne lepšie** — lokálni súperi (naše boty)
+neútočia z čerstvých captures na 3–4 stacky. Online test na seedoch prehier:
+
+| súper | bez obrany | s obranou |
+|---|---|---|
+| Erickpi | L 36:67 | **W 184:−1** |
+| AdrienGI | W 95:−1 | **W 72:−1** |
+| tnkt | L −1:261 | **W 154:−1** |
+| sabuka | L −1:685 | **W 104:−1** |
+| Dinnerwolph | L −1:62 | L −1:105 |
+
+Poučenie: parametre obrany/rizika ladiť online, nie lokálnym self-play.
+
 Čo NEpomohlo (netreba skúšať znova): `DANGER_CAP>0`, `EXP2>0` (defenzíva = capture stall, lokálne 2/80),
 `CONTEST_D`, ladenie `EXP/V_CAP/V_LOSE/THREAT/SPR/WU` (všetko šum).
 

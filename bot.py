@@ -28,7 +28,12 @@ P = {
     "OADJ_MAX": 1,  # cap on enemy units counted as able to reinforce a corner
     "RISK": 1.0,  # weight (in units) of the expected loss to a predicted enemy ATTACK
     "RISK_CAPW": 0.3,  # weight of triangles the enemy may capture this turn in the threat map
-    "RISK_NET": 3.0,  # an ATTACK costs the enemy 3 units + the triangle: only losses above this count
+    "RISK_NET": 2.0,
+    "RISK_CAPW_ATT": 1.0,  # RISK_CAPW once the enemy has made ATT_SEEN attacks
+    "ATT_SEEN": 1,
+    "ATK_S": 3.0,  # prior strength (pseudo-observations) of the attack-probability table
+    "HOME_W": 0.6,  # extra weight of triangles closer to our start than to the enemy's
+    "AWAY_W": 0.0,  # weight reduction of triangles closer to the enemy's start  # an ATTACK costs the enemy 3 units + the triangle: only losses above this count
     "FREE_SPAWN_TURNS": 40,
     "CAP_MIN": 20,
     "CAP_MUL": 1.25,
@@ -59,7 +64,6 @@ turn = 0
 # ---------------- opponent model (learned from state diffs, actions are not in the input) ----------------
 # P(opponent ATTACKs | largest stack of ours in reach of his usable triangles), prior from ~80 logged games
 ATK_PRIOR = [0.0, 0.01, 0.15, 0.32, 0.40, 0.56]
-ATK_S = 3.0
 atk_n = [0] * 6
 atk_a = [0] * 6
 # P(opponent owns triangle at end of turn | corners he holds now, corners he can win now)
@@ -138,7 +142,7 @@ def learn(my, op, owner):
 def atk_prob():
     p = [0.0] * 6
     for k in range(1, 6):
-        p[k] = max(p[k - 1], (atk_a[k] + ATK_PRIOR[k] * ATK_S) / (atk_n[k] + ATK_S))
+        p[k] = max(p[k - 1], (atk_a[k] + ATK_PRIOR[k] * P["ATK_S"]) / (atk_n[k] + P["ATK_S"]))
     return p
 
 while True:
@@ -195,6 +199,15 @@ while True:
             for y in aff_h[x]:
                 s.update(tris_of[y])
             aff_t.append(sorted(s))
+        # home side of each triangle: whose start is closer to all of its corners
+        st_me = [h for h in range(N) if my[h] > 0]
+        st_op = [h for h in range(N) if op[h] > 0]
+        side = []
+        for cs in tri_c:
+            dm = max(min(dist[s][c] for s in st_me) for c in cs) if st_me else 99
+            do = max(min(dist[s][c] for s in st_op) for c in cs) if st_op else 99
+            side.append(1 if dm < do else -1 if do < dm else 0)
+        tw = [1.0 + P["HOME_W"] if s == 1 else 1.0 - P["AWAY_W"] if s == -1 else 1.0 for s in side]
 
     T = len(tri_c)
     owner = [int(r[3]) for r in raw]
@@ -211,6 +224,8 @@ while True:
     act = min(3.0, max(0.3, (cap_act + 2.0) / (cap_pred + 2.0)))
     # threat[i]: P(opponent can ATTACK from triangle i next turn) = owns it after this turn with units on it
     risk = [0.0] * N
+    # an enemy that already attacked tends to attack from fresh captures as well
+    capw = P["RISK_CAPW_ATT"] if len(opp_attacks) >= P["ATT_SEEN"] else P["RISK_CAPW"]
     if P["RISK"] > 0:
         safe = [1.0] * N
         for i in range(T):
@@ -218,7 +233,7 @@ while True:
             if owner[i] == 1:
                 th = keep * (0.9 if all(op[c] >= 1 for c in cs) else 0.3)
             elif opcap[i]:
-                th = min(0.9, cap_feat(i, my, op) * act * P["RISK_CAPW"])
+                th = min(0.9, cap_feat(i, my, op) * act * capw)
             else:
                 continue
             if th <= 0:
@@ -469,6 +484,9 @@ while True:
         return v
 
     def tri_term(i, own):
+        return tri_term0(i, own) * tw[i]
+
+    def tri_term0(i, own):
         a, b, c = tri_c[i]
         oa, ob, oc = own[a], own[b], own[c]
         if used[i]:
