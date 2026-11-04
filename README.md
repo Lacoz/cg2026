@@ -115,6 +115,23 @@ neútočia z čerstvých captures na 3–4 stacky. Online test na seedoch prehie
 
 Poučenie: parametre obrany/rizika ladiť online, nie lokálnym self-play.
 
+### Prehra s kosynus → nespawnovať sporné huby (2026-11-04 15:30)
+
+Príčina (game 916573384, 32:306): na začiatku T12 sme vlastnili všetkých 5 trojuholníkov na dome 3
+(stupeň 7) a bot na nich naraz spawnol. Spawnutý trojuholník je pre nás zatvorený, kým nevyprázdnime
+všetky rohy (dom 3 sa vyprázdniť nedá — prišli by sme o hub), ale pre súpera otvorený. kosynus tam
+posielal 6–8 stacky, celý klaster zobral, T15–21 captures 26:5, naši okolo pomreli na SUR.
+
+Oprava v `bot.py` (`SP_HOLD=1`, `SP_HUBN=3`, `SP_R=1`, `SP_CASH=1`): nespawnovať trojuholník, ktorého roh
+je zdieľaný ≥ 3 našimi trojuholníkmi a má súperove jednotky na sebe alebo na susedoch — držíme ho.
+Výnimka: ak ho súper môže tento ťah aj tak zobrať (všetky rohy vyhrateľné), spawneme (cash-out).
+Široká verzia (každý sporný trojuholník) bola lokálne katastrofa (41/280, bez cash-out 2/280),
+hub-only lokálne neutrálna (129/280).
+
+Online na seedoch prehier (`SP_HUBN=3`): kosynus **W 105:−1** (bez opravy L −1:90), AdrienGI W 103:−1,
+Erickpi W 142:−1, sabuka W 121:−1, Dinnerwolph **W 132:−1** (predtým vždy L), kosynus seed 2 L −1:312
+(iný vzor — prerástol nás od T10). `SP_HUBN=4` bolo horšie (L s Erickpi aj Dinnerwolph).
+
 Čo NEpomohlo (netreba skúšať znova): `DANGER_CAP>0`, `EXP2>0` (defenzíva = capture stall, lokálne 2/80),
 `CONTEST_D`, ladenie `EXP/V_CAP/V_LOSE/THREAT/SPR/WU` (všetko šum).
 

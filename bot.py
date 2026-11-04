@@ -42,6 +42,10 @@ P = {
     "ATK_S": 3.0,  # prior strength (pseudo-observations) of the attack-probability table
     "HOME_W": 0.6,  # extra weight of triangles closer to our start than to the enemy's
     "AWAY_W": 0.0,  # weight reduction of triangles closer to the enemy's start  # an ATTACK costs the enemy 3 units + the triangle: only losses above this count
+    "SP_HOLD": 1,  # hold (do not spawn) triangles with enemy units on or next to a corner
+    "SP_R": 1,  # 0: only enemy units on the corners count, 1: also on their neighbors
+    "SP_HUBN": 3,  # ... only on corners shared by at least this many of our triangles
+    "SP_CASH": 1,  # still spawn a held triangle the enemy can take this turn anyway
     "FREE_SPAWN_TURNS": 40,
     "CAP_MIN": 20,
     "CAP_MUL": 1.25,
@@ -285,8 +289,17 @@ while True:
     else:
         cap = max(P["CAP_MIN"], oarmy * P["CAP_MUL"] + P["CAP_ADD"])
     cap = min(cap, P["CAP_MAX"])
+    # a spawned triangle stays closed to us until all its corners are empty, but stays open
+    # to the enemy: next to enemy units we keep holding it, unless he can take it anyway
+    near_op = [op[x] + (sum(op[n] for n in nb[x]) if P["SP_R"] >= 1 else 0) for x in range(N)]
+    mine_at = [sum(1 for j in tris_of[x] if owner[j] == 0) for x in range(N)]
     for i in range(T):
         if owner[i] == 0 and not used[i] and army + len(spawn_tris) < cap:
+            cs = tri_c[i]
+            if P["SP_HOLD"] and any(near_op[c] > 0 and mine_at[c] >= P["SP_HUBN"] for c in cs):
+                lost = all(op[c] + sum(op[n] for n in nb[c]) > my[c] for c in cs)
+                if not (P["SP_CASH"] and lost):
+                    continue
             spawn_tris.append(i)
             used[i] = True
 
