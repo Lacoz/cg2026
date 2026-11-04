@@ -96,11 +96,12 @@ def main() -> int:
         type=str,
         help="Raw game_options string (overrides --seed)",
     )
+    parser.add_argument("--bot", type=Path, help="Bot file (default: bot from scoring.yaml)")
     args = parser.parse_args()
 
     cfg = load_cfg(args.config)
     challenge = cfg["challenge"]
-    bot_path = ROOT / cfg["bot"]
+    bot_path = args.bot.resolve() if args.bot else ROOT / cfg["bot"]
     language = cfg["language"]
     runs_path = ROOT / cfg.get("results_dir", "results") / "runs.jsonl"
 

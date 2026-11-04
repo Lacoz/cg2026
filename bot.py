@@ -1,932 +1,750 @@
 import sys
+import time
 from collections import deque
-import itertools
 
-houses = {}
-adj = {}
+# Tunable weights (unit value = WU).
+P = {
+    "WU": 10.0,  # value of one of our units
+    "WK": 9.0,  # value of killing one enemy unit by surround
+    "V_CAP": 14.0,  # capture a neutral triangle
+    "V_STEAL": 24.0,  # capture an enemy triangle
+    "V_LOSE": 20.0,  # enemy captures one of ours
+    "V_OPPCAP": 7.0,  # enemy captures a neutral triangle
+    "V_RESET": 6.0,  # all corners of a used triangle empty -> capturable again
+    "V_RPART": 0.6,  # per empty corner of a used triangle
+    "V_PART": 0.2,  # per owned corner of a capturable triangle
+    "EXP": 0.0,  # per unit in a >=3 stack inside enemy ATTACK reach
+    "EXP2": 0.0,  # per unit in a 2-stack inside enemy ATTACK reach
+    "DANGER_CAP": 0.0,  # danger weight of triangles the enemy can capture this turn
+    "SURR": 0.0,  # per unit on a house the enemy could surround next turn
+    "SPR": 0.4,  # per surplus unit on a house
+    "FW": 1.0,  # pull per step toward the assigned corner
+    "FW_IDLE": 0.3,  # pull per step for unassigned units
+    "ATK_MIN": 4,  # min kills for an ATTACK
+    "THREAT": 5.0,  # our triangle with all corners enemy-reachable and unguarded
+    "MAXD": 9,  # max completion distance considered by the assignment
+    "CONTEST_D": 0.0,  # assignment: extra turns charged per contested/exposed corner
+    "P_CONT": 0.7,  # capture value factor per corner the enemy can still out-reinforce
+    "OADJ_MAX": 1,  # cap on enemy units counted as able to reinforce a corner
+    "RISK": 1.0,  # weight (in units) of the expected loss to a predicted enemy ATTACK
+    "RISK_CAPW": 0.3,  # weight of triangles the enemy may capture this turn in the threat map
+    "RISK_NET": 3.0,  # an ATTACK costs the enemy 3 units + the triangle: only losses above this count
+    "FREE_SPAWN_TURNS": 40,
+    "CAP_MIN": 20,
+    "CAP_MUL": 1.25,
+    "CAP_ADD": 8,
+    "CAP_MAX": 80,
+    "BUDGET": 0.022,
+}
 
 
-def bfs(src):
-    d = {src: 0}
-    q = deque([src])
-    while q:
-        u = q.popleft()
-        for v in adj.get(u, ()):
-            if v not in d:
-                d[v] = d[u] + 1
-                q.append(v)
-    return d
+def ints():
+    return [int(x) for x in input().split()]
 
 
-house_count = int(input())
-for _ in range(house_count):
-    hid, x, y = [int(j) for j in input().split()]
-    houses[hid] = (x, y)
-    adj.setdefault(hid, set())
+N = int(input())
+for _ in range(N):
+    input()
 
-start_my = None
-start_opp = None
-home_side = set()
+nb = None
+dist = None
+order_from = None
+tri_c = None
+tri_nb = None
+aff_h = None
+aff_t = None
+pair_cache = {}
+turn = 0
 
-# Persistent focus: the triangle we are committed to capturing. Without it the
-# greedy re-evaluates every turn, units wander through hubs (pass-through parking)
-# and we lose the early-game race to opponents that commit immediately.
-FOCUS = None
-FOCUS_AGE = 0
-LAST_FOCUS = None  # recently captured focus — keep its cluster intact for chaining
-TURN_NO = 0  # game turn counter for the spawn-phase schedule
-CONTESTED = set()  # houses where we captured over enemy units — their capture force
-# sits there and swarm opponents (AdrienGI) hunt exactly these stacks with ATTACK
-LAST_OWNER = {}  # corner-tuple -> owner last turn; detects enemy just-neutralized triangles
+# ---------------- opponent model (learned from state diffs, actions are not in the input) ----------------
+# P(opponent ATTACKs | largest stack of ours in reach of his usable triangles), prior from ~80 logged games
+ATK_PRIOR = [0.0, 0.01, 0.15, 0.32, 0.40, 0.56]
+ATK_S = 3.0
+atk_n = [0] * 6
+atk_a = [0] * 6
+# P(opponent owns triangle at end of turn | corners he holds now, corners he can win now)
+CAP_TAB = {(0, 2): 0.018, (0, 3): 0.07, (1, 2): 0.007, (1, 3): 0.14, (2, 2): 0.068, (2, 3): 0.33}
+cap_pred = 0.0
+cap_act = 0
+own_n = 0
+own_kept = 0
+opp_attacks = []  # stack sizes the opponent killed
+prev = None  # (my, op, owner, opcap, our moves, our spawns, our attacks)
+
+
+def cap_feat(i, mine, theirs):
+    m = w = 0
+    for c in tri_c[i]:
+        if theirs[c] > mine[c]:
+            m += 1
+        if theirs[c] + sum(theirs[n] for n in nb[c]) > mine[c]:
+            w += 1
+    return CAP_TAB.get((m, w), 0.0)
+
+
+def learn(my, op, owner):
+    """Update the opponent model from what changed since our previous turn."""
+    global cap_pred, cap_act, own_n, own_kept
+    pmy, pop, pown, popcap, pmoves, pspawns, patks = prev
+    T_ = len(tri_c)
+    exp = pmy[:]
+    for a, b, c, tg in patks:
+        for x in (a, b, c):
+            exp[x] -= 1
+    out = [0] * N
+    for s, d, n in pmoves:
+        exp[s] -= n
+        exp[d] += n
+        out[s] += n
+    for s in pspawns:
+        exp[s] += 1
+    deficit = [exp[x] - my[x] for x in range(N)]
+    usable = [i for i in range(T_) if pown[i] == 1 and all(pop[c] >= 1 for c in tri_c[i])]
+    used = [i for i in usable if owner[i] == -1]
+    reach = set()
+    for i in usable:
+        reach.update(tri_nb[i])
+    kmax = max((pmy[h] for h in reach), default=0)
+    hits = 0
+    if used:
+        tg_set = set()
+        for i in used:
+            tg_set.update(tri_nb[i])
+        for h in sorted((h for h in tg_set if pmy[h] > 0), key=lambda h: -pmy[h]):
+            if hits >= len(used):
+                break
+            pd = {h: pmy[h] - out[h]}
+            for s, d, n in pmoves:
+                if s == h:
+                    pd[d] = pd.get(d, 0) + n
+            if all(v <= deficit[x] for x, v in pd.items()):
+                for x, v in pd.items():
+                    deficit[x] -= v
+                hits += 1
+                opp_attacks.append(pmy[h])
+    if kmax > 0:
+        k = min(kmax, 5)
+        atk_n[k] += 1
+        atk_a[k] += 1 if hits else 0
+    for i in range(T_):
+        if pown[i] == 1:
+            own_n += 1
+            own_kept += owner[i] == 1
+        elif popcap[i]:
+            cap_pred += cap_feat(i, pmy, pop)
+            cap_act += owner[i] == 1
+
+
+def atk_prob():
+    p = [0.0] * 6
+    for k in range(1, 6):
+        p[k] = max(p[k - 1], (atk_a[k] + ATK_PRIOR[k] * ATK_S) / (atk_n[k] + ATK_S))
+    return p
 
 while True:
-    my_score, opp_score = [int(i) for i in input().split()]
-    my, opp = {}, {}
-    for _ in range(house_count):
-        hid, mu, ou = [int(j) for j in input().split()]
-        my[hid], opp[hid] = mu, ou
-    for _ in range(int(input())):
-        a, b = [int(j) for j in input().split()]
-        adj.setdefault(a, set()).add(b)
-        adj.setdefault(b, set()).add(a)
-    tris = []
-    for _ in range(int(input())):
-        h1, h2, h3, owner, me_cap, opp_cap = input().split()
-        tris.append((int(h1), int(h2), int(h3), int(owner), me_cap != "0", opp_cap != "0"))
+    line = input()
+    t_start = time.perf_counter()
+    turn += 1
+    my_score, op_score = [int(x) for x in line.split()]
+    my = [0] * N
+    op = [0] * N
+    for _ in range(N):
+        h, a, b = ints()
+        my[h] = a
+        op[h] = b
+    edges = [ints() for _ in range(int(input()))]
+    raw = [input().split() for _ in range(int(input()))]
     for _ in range(int(input())):
         input()
 
-    dist_from = {h: bfs(h) for h in houses}
+    if nb is None:
+        nb = [[] for _ in range(N)]
+        for a, b in edges:
+            nb[a].append(b)
+            nb[b].append(a)
+        for l in nb:
+            l.sort()
+        dist = []
+        for s in range(N):
+            d = [99] * N
+            d[s] = 0
+            q = deque([s])
+            while q:
+                u = q.popleft()
+                for v in nb[u]:
+                    if d[v] == 99:
+                        d[v] = d[u] + 1
+                        q.append(v)
+            dist.append(d)
+        order_from = [sorted(range(N), key=lambda h, s=s: dist[s][h]) for s in range(N)]
+        tri_c = [(int(r[0]), int(r[1]), int(r[2])) for r in raw]
+        tris_of = [[] for _ in range(N)]
+        for i, cs in enumerate(tri_c):
+            for c in cs:
+                tris_of[c].append(i)
+        tri_nb = []
+        for cs in tri_c:
+            s = set(cs)
+            for c in cs:
+                s.update(nb[c])
+            tri_nb.append(sorted(s))
+        aff_h = [sorted({x} | set(nb[x])) for x in range(N)]
+        aff_t = []
+        for x in range(N):
+            s = set()
+            for y in aff_h[x]:
+                s.update(tris_of[y])
+            aff_t.append(sorted(s))
 
-    def dist(a, b):
-        return dist_from[a].get(b, 999)
-
-    if start_my is None:
-        start_my = [h for h, cnt in my.items() if cnt > 0]
-        start_opp = [h for h, cnt in opp.items() if cnt > 0]
-        for h in houses:
-            dm = min((dist(h, s) for s in start_my), default=0)
-            do = min((dist(h, s) for s in start_opp), default=99)
-            if dm <= do:
-                home_side.add(h)
-
-    def first_step(src, dst):
-        if src == dst:
-            return src
-        best_n = src
-        best_d = 999
-        for n in sorted(adj.get(src, ())):
-            d = dist(n, dst)
-            if d < best_d:
-                best_d = d
-                best_n = n
-        return best_n
-
-    corner_deg = {h: 0 for h in houses}
-    for t in tris:
-        for c in t[:3]:
-            corner_deg[c] += 1
-
-    tri_hub = {}
-    for t in tris:
-        cs = t[:3]
-        s = sum(corner_deg[c] for c in cs)
-        adj_t = sum(1 for t2 in tris if len(set(cs) & set(t2[:3])) >= 2)
-        tri_hub[cs] = (adj_t, s)
-
-    army = sum(my.values())
-    opp_army = sum(opp.values())
-    TURN_NO += 1
-
-    # PHASE SCHEDULE: each triangle cycles spawn -> vacate -> capture in 3 turns.
-    # The phases are staggered deterministically (hash of corners + turn), so at any
-    # moment only ~1/3 of our triangles need their corners staffed and the rest of
-    # the army is FREE to swarm captures. This is what [CG]loick/Rikus do and we
-    # didn't: our old anchors parked 2/3 of the army doing nothing.
-    def phase_of(cs):
-        return (TURN_NO + sum(cs)) % 3
-
-    owned = [t for t in tris if t[3] == 0]
-    usable = [t for t in owned if all(my.get(c, 0) > 0 for c in t[:3])]
-    used_tris = set()
+    T = len(tri_c)
+    owner = [int(r[3]) for r in raw]
+    mecap = [r[4] == "1" for r in raw]
+    opcap = [r[5] == "1" for r in raw]
+    army = sum(my)
+    oarmy = sum(op)
+    my0 = my[:]
+    op0 = op[:]
+    if prev is not None:
+        learn(my, op, owner)
+    pk = atk_prob()
+    keep = (own_kept + 0.5 * 4) / (own_n + 4)
+    act = min(3.0, max(0.3, (cap_act + 2.0) / (cap_pred + 2.0)))
+    # threat[i]: P(opponent can ATTACK from triangle i next turn) = owns it after this turn with units on it
+    risk = [0.0] * N
+    if P["RISK"] > 0:
+        safe = [1.0] * N
+        for i in range(T):
+            cs = tri_c[i]
+            if owner[i] == 1:
+                th = keep * (0.9 if all(op[c] >= 1 for c in cs) else 0.3)
+            elif opcap[i]:
+                th = min(0.9, cap_feat(i, my, op) * act * P["RISK_CAPW"])
+            else:
+                continue
+            if th <= 0:
+                continue
+            for h in tri_nb[i]:
+                safe[h] *= 1.0 - th
+        risk = [1.0 - s for s in safe]
     cmds = []
+    used = [False] * T
 
-    # Threat map (needed by the ATTACK section below).
-    opp_tris = [t[:3] for t in tris if t[3] == 1 and all(opp.get(c, 0) > 0 for c in t[:3])]
-    attack_danger = set()
-    for ot in opp_tris:
-        for c in ot:
-            attack_danger.update(adj.get(c, ()))
-
-    def risky(h):
-        """Parking danger: dead-ends and houses fully surrounded by the opponent
-        get swept (surround kill) or ATTACKed."""
-        neighs = list(adj.get(h, ()))
-        if not neighs:
-            return 2
-        opp_nb = sum(1 for m in neighs if opp.get(m, 0) > 0)
-        if opp_nb == len(neighs):
-            return 2
-        return 1 if opp_nb > 0 else 0
-
-    # 1. ATTACK only when it's strictly profitable (kills >= 4, or kills >= 3 when army >= 18)
-    # SAFETY: attack only from a triangle whose corners are NOT in the enemy's attack
-    # blast radius — simultaneous attacks resolve against each other and our corner
-    # units can die first, silently voiding our ATTACK (ChuOkupai f44).
-    for t in sorted(
-        usable,
-        key=lambda tr: max((opp.get(n, 0) for c in tr[:3] for n in adj.get(c, ())), default=0),
-        reverse=True,
-    ):
-        corners = t[:3]
-        best_n = None
-        best_kill = 0
-        for c in corners:
-            for n in adj.get(c, ()):
-                k = opp.get(n, 0)
-                if k > best_kill:
-                    best_kill = k
-                    best_n = n
-        if best_n is not None and (
-            best_kill >= 5
-            or (best_kill >= 4 and army >= 18 and len(usable) - len(used_tris) >= 2)
-            or (best_kill >= 3 and army >= 28 and len(usable) - len(used_tris) >= 3)
-        ) and opp.get(best_n, 0) > 0:
-            # Skip if our attacking triangle's corners sit in the enemy attack blast
-            # radius OR near enemy units at all — simultaneous attacks can kill our
-            # corner units first and our ATTACK silently fails (wasted triangle +
-            # wasted turn, ChuOkupai f40/f44). Be conservative: attacks only when
-            # clearly safe and clearly profitable.
-            if all(c not in attack_danger for c in corners) and all(opp.get(c, 0) == 0 for c in corners):
-                cmds.append(f"ATTACK {corners[0]} {corners[1]} {corners[2]} {best_n}")
-                used_tris.add(corners)
-                opp[best_n] = 0
-                for c in corners:
-                    my[c] = max(0, my[c] - 1)
-
-    # 2. Staggered engine cycles: split usable owned triangles into a SPAWN group and a HOLD group.
-    # Spawning neutralizes a triangle (owner -> None), so spawning on ALL of them at once kills our
-    # scoring base AND leaves nothing to spawn on next turn. Instead: high-hub triangles HOLD
-    # (keep scoring + stay spawn-ready), low-hub triangles SPAWN this turn. Next turn the roles
-    # swap as vacated units restaff the spawn group. This is how Arnaud.Net kept spawning 5-16
-    # units/turn while always keeping a scoring base.
-    max_army = max(36, opp_army + 12)
-    to_spawn = []
-    hold_group = []
-    if army < max_army:
-        # PHASE SCHEDULE: prefer phase-0 triangles (their staffing cycle aligned),
-        # but the spawn engine NEVER sleeps — if no phase-0 triangle is usable,
-        # spawn on the best usable triangle anyway (army growth beats schedule).
-        spawnable = [t for t in usable if t[:3] not in used_tris]
-        in_phase = [t for t in spawnable if phase_of(t[:3]) == 0]
-        ordered = in_phase + [t for t in spawnable if t not in in_phase]
-        # Spawn WHERE it hurts least: never on the fresh capture that anchors the
-        # cluster chain. Rank spawnable by (shared corners with FOCUS asc, hub desc)
-        # so high-connectivity triangles stay owned and keep chaining captures.
-        focus_set = set(FOCUS if FOCUS else LAST_FOCUS or ())
-
-        def spawn_rank(t):
-            shared = len(set(t[:3]) & focus_set)
-            return (shared, -tri_hub[t[:3]][0], -tri_hub[t[:3]][1])
-
-        ordered.sort(key=spawn_rank)
-        hold_group = [t[:3] for t in ordered]
-        spawn_candidates = ordered
-        for t in spawn_candidates:
-            if army + len(to_spawn) >= max_army:
-                break
-            to_spawn.append(t[:3])
-            used_tris.add(t[:3])
-
-    # 3. Jointly optimize SPAWN corner choices + 1-turn (`d <= 1`) unit movements!
-    avail = dict(my)
-    locked_end = {h: 0 for h in houses}
-    spawn_houses = {h: 0 for h in houses}
-    cands = [t for t in tris if t[3] != 0 and t[4]]
-
-    # PHASE LOCK (light): units on corners of owned triangles whose spawn turn is
-    # NEXT (phase 2) hold their position — max 1 per house total (hub houses shared
-    # by many triangles must not accumulate one locked unit PER TRIANGLE).
-    locked_total = 0
-    lock_budget = max(0, army // 2)
-    for t in sorted(owned, key=lambda x: -tri_hub[x[:3]][0]):
-        cs = t[:3]
-        if cs in used_tris or phase_of(cs) != 2:
+    # ---------------- ATTACK ----------------
+    atk = []
+    for i in range(T):
+        if owner[i] != 0:
             continue
-        if locked_total >= lock_budget:
-            break
-        for c in cs:
-            if locked_total >= lock_budget:
-                break
-            # house-level cap: total units committed to this house (sitting +
-            # spawning + en route) must stay <= 2, and lock at most 1 here
-            committed = my.get(c, 0) + spawn_houses.get(c, 0) + en_route.get(c, 0)
-            if committed >= 2:
-                continue
-            take = min(1, avail.get(c, 0), lock_budget - locked_total)
-            if take > 0:
-                avail[c] = max(0, avail.get(c, 0) - take)
-                locked_end[c] += take
-                locked_total += take
+        a, b, c = tri_c[i]
+        if my[a] < 1 or my[b] < 1 or my[c] < 1:
+            continue
+        for tg in tri_nb[i]:
+            k = op[tg]
+            if k >= 1:
+                atk.append((k, i, tg))
+    atk.sort(reverse=True)
+    hit = set()
+    for k, i, tg in atk:
+        if used[i] or tg in hit:
+            continue
+        a, b, c = tri_c[i]
+        if my[a] < 1 or my[b] < 1 or my[c] < 1:
+            continue
+        ok = k >= P["ATK_MIN"] + 1 or (k >= P["ATK_MIN"] and army >= oarmy)
+        if not ok:
+            continue
+        used[i] = True
+        hit.add(tg)
+        op[tg] = 0
+        my[a] -= 1
+        my[b] -= 1
+        my[c] -= 1
+        cmds.append(f"ATTACK {a} {b} {c} {tg}")
 
-    avail_total = sum(avail.values())
-    must_vacate = {c for t in tris if t[3] != 0 and not t[4] for c in t[:3]} | {
-        c for cs in to_spawn for c in cs
-    }
-    resettable_tris = [t[:3] for t in tris if (t[3] != 0 and not t[4]) or (t[:3] in to_spawn)]
-
-    owner_now = {t[:3]: t[3] for t in tris}
-    me_cap_now = {t[:3]: t[4] for t in tris}
-
-    opp_reach1 = {
-        h: opp.get(h, 0) + sum(opp.get(n, 0) for n in adj.get(h, ()) if n not in home_side or opp.get(n, 0) > 0)
-        for h in houses
-    }
-
-    # Units committed this turn that arrive on `h` NEXT turn (multi-step moves).
-    # Without this, two triangles sharing a corner both send units to it and the
-    # excess piles up into one enemy ATTACK target (czuk killed 6 units this way).
-    en_route = {}
-
-    # TRAP RISK v2: if we stack units on corner H of triangle t, the opponent can
-    # ATTACK H next turn from any of THEIR triangles that (a) can reach H (a corner
-    # adjacent to H) and (b) we do NOT break by capturing t (shares no corner with t).
-    # v2: also counts POTENTIALLY-ready triangles — the enemy can staff all 3 corners
-    # THIS turn (their units within 1 step of every corner), so the triangle becomes
-    # ready in the very round we capture (AdrienGI made 3 ready triangles per round
-    # and hunted our stacks with 6 attacks). Uncontested corners (opp == 0) are safe.
-    opp_potential = []
-    for t in tris:
-        if t[3] == 1:
-            cs = t[:3]
-            # enemy can staff every corner within 1 step (units there or adjacent)
-            if all(
-                opp.get(c, 0) > 0
-                or any(opp.get(u, 0) > 0 and dist(u, c) == 1 for u in houses)
-                for c in cs
-            ):
-                opp_potential.append(cs)
-
-    def trap_risk(t):
-        cs = set(t[:3])
-        for H in t[:3]:
-            # uncontested corner: nothing to attack there — no stack exposure
-            if opp.get(H, 0) == 0 and not any(
-                opp.get(u, 0) > 0 and dist(u, H) == 1 for u in houses
-            ):
-                continue
-            for ot in opp_tris + opp_potential:
-                ocs = set(ot)
-                if ocs & cs:
-                    continue  # capturing t breaks ot — no trap
-                if any(dist(c, H) == 1 for c in ot):
-                    return 1
-        return 0
-
-    cand_home_deg = {
-        h: sum(1 for tr in cands if h in tr[:3] and tr[:3] not in used_tris and all(c in home_side for c in tr[:3]))
-        for h in houses
-    }
-    cand_any_deg = {
-        h: sum(1 for tr in cands if h in tr[:3] and tr[:3] not in used_tris and opp.get(h, 0) == 0)
-        for h in houses
-    }
-    blocked_deg = {
-        h: sum(1 for tr in tris if h in tr[:3] and (not tr[4] or tr[:3] in used_tris))
-        for h in houses
-    }
-
-    # 4. Greedy assignment to capture triangles (me_cap=True, owner!=0) with available units (`avail`).
-    # FOCUS: sticky commitment — pick the target ONCE and keep it until captured
-    # (or hopeless). Prevents turn-by-turn re-targeting that makes units wander.
-    # NOTE: module-level scope — no `global` needed (and it would be a SyntaxError).
-    focus_cs = None
-    if FOCUS is not None:
-        ft = next((t for t in tris if t[:3] == FOCUS), None)
-        if ft is None:
-            FOCUS = None
-        elif ft[3] == 0:
-            LAST_FOCUS = FOCUS  # captured — keep its cluster intact when choosing spawn targets
-            FOCUS = None  # mission complete
-        elif not ft[4] and ft[3] != 0:
-            FOCUS_AGE += 1  # me_cap False: waiting for reset/vacate — keep waiting
-        else:
-            FOCUS_AGE += 1
-        if FOCUS_AGE > 14:
-            FOCUS = None  # hopeless — re-target
-    if FOCUS is None:
-        unit_houses = [h for h, cnt in my.items() if cnt > 0]
-        owned_cs = [set(t[:3]) for t in owned]
-        pool = [t for t in cands if t[4]]
-        if pool:
-            def focus_rank(t):
-                dmax = max(
-                    min(dist(u, c) for u in unit_houses) for c in t[:3]
-                )
-                # Cluster growth: prefer triangles sharing a corner with one we own —
-                # the capture force can re-task between them and spawns chain.
-                cluster = 0 if any(set(t[:3]) & ocs for ocs in owned_cs) else 1
-                return (
-                    cluster,
-                    dmax,
-                    -tri_hub[t[:3]][0],
-                    0 if t[3] == 1 else 1,
-                )
-            pool.sort(key=focus_rank)
-            FOCUS = pool[0][:3]
-            FOCUS_AGE = 0
-    focus_cs = FOCUS
-
-    # 4A. First find all triangles that can be captured THIS turn (`max_d <= 1`)!
-    imm_cands = [
-        t
-        for t in cands
-        if all(
-            locked_end.get(c, 0)
-            + sum(avail.get(u, 0) for u in houses if dist(u, c) <= 1)
-            + sum(1 for sp in to_spawn if c in sp)
-            > opp.get(c, 0)
-            for c in t[:3]
-        )
-    ]
-    if len(imm_cands) > 7:
-        imm_cands.sort(
-            key=lambda t: (
-                0 if all(c in home_side for c in t[:3]) else 1,
-                0 if t[3] == 1 else 1,
-                -tri_hub[t[:3]][0],
-                -tri_hub[t[:3]][1],
-            )
-        )
-        imm_cands = imm_cands[:7]
-
-    def can_satisfy(sub, cur_avail, cur_locked, used_sp):
-        corners_set = {c for t in sub for c in t[:3]}
-        reqs = {c: max(0, (opp.get(c, 0) + 1) - cur_locked.get(c, 0)) for c in corners_set}
-
-        sp_choices = []
-        used_sp_corners = set(used_sp)
-        for corners in to_spawn:
-            # HARD exclusion: never spawn two units onto the same corner this turn
-            # (they cannot move and pile up into one enemy ATTACK target).
-            options = [c for c in corners if c not in used_sp_corners] or list(corners)
-            best_c = max(
-                options,
-                key=lambda c: (
-                    2 if reqs.get(c, 0) > 0 else (1 if (c in corners_set and c not in used_sp_corners) else 0),
-                    -min(my.get(c, 0), 3),  # prefer emptier corners — no spawn piles
-                    -sum(cur_avail.get(u, 0) for u in houses if dist(u, c) <= 1) if reqs.get(c, 0) > 0 else -999,
-                    0 if c not in used_sp_corners else -1,
-                    cand_home_deg[c],
-                    cand_any_deg[c],
-                    -blocked_deg[c],
-                    corner_deg[c],
-                ),
-            )
-            sp_choices.append((corners, best_c))
-            used_sp_corners.add(best_c)
-            if reqs.get(best_c, 0) > 0:
-                reqs[best_c] -= 1
-
-        total_add = sum(reqs.values())
-        if total_add > sum(cur_avail.values()):
-            return None
-
-        rem_avail = dict(cur_avail)
-        moves = []
-        order = sorted(
-            [c for c, r in reqs.items() if r > 0],
-            key=lambda c: sum(rem_avail.get(u, 0) for u in houses if dist(u, c) <= 1),
-        )
-        for c in order:
-            need = reqs[c]
-            srcs = [u for u in houses if rem_avail.get(u, 0) > 0 and dist(u, c) <= 1]
-            srcs.sort(
-                key=lambda u: (
-                    0 if (u in must_vacate and u != c) else 1,
-                    sum(1 for t_c in order if dist(u, t_c) <= 1),
-                    dist(u, c),
-                    -corner_deg.get(u, 0),
-                )
-            )
-            for u in srcs:
-                cnt = rem_avail[u]
-                take = cnt if cnt < need else need
-                if take > 0:
-                    rem_avail[u] -= take
-                    need -= take
-                    moves.append((u, c, take))
-                    if need == 0:
-                        break
-            if need > 0:
-                return None
-        end_sp = {c for _, c in sp_choices} | corners_set
-        resets = sum(1 for rt in resettable_tris if not any(c in end_sp for c in rt))
-        reach_sc = sum(cand_home_deg[c] * 3 + cand_any_deg[c] for _, c in sp_choices)
-        return sp_choices, moves, total_add, resets, reach_sc
-
-    best_imm = None
-    if imm_cands:
-        spawned_corners = set()
-        n_imm = len(imm_cands)
-        subsets_to_try = []
-        # BURST: try up to 4-subsets when the candidate list is small — joint
-        # multi-capture in one turn is how AdrienGI took 7 triangles at once.
-        # With shared corners a burst costs only the non-shared corners.
-        max_r = min(4, n_imm) if n_imm <= 6 else min(3, n_imm)
-        for r in range(max_r, 0, -1):
-            subsets_to_try.extend(itertools.combinations(imm_cands, r))
-        tried = 0
-        for sub in subsets_to_try:
-            tried += 1
-            if tried > 200:
-                break
-            res = can_satisfy(sub, avail, locked_end, spawned_corners)
-            if res is not None:
-                sp_choices, moves, total_add, resets, reach_sc = res
-                opp_owned = sum(1 for t in sub if t[3] == 1)
-                home_cnt = sum(1 for t in sub if all(c in home_side for c in t[:3]))
-                safe_cnt = sum(1 for t in sub if all(opp_reach1.get(c, 0) == 0 for c in t[:3]))
-                trap_cnt = sum(1 for t in sub if trap_risk(t))
-                hub_sc = sum(tri_hub[t[:3]][0] * 10 + tri_hub[t[:3]][1] for t in sub)
-                sc = (len(sub), safe_cnt, -trap_cnt, home_cnt, opp_owned, reach_sc, resets, -total_add, hub_sc)
-                if best_imm is None or sc > best_imm[0]:
-                    best_imm = (sc, sub, sp_choices, moves)
-
-    if best_imm is not None:
-        _, sub, sp_choices, moves = best_imm
-        for corners, best_c in sp_choices:
-            others = [c for c in corners if c != best_c]
-            cmds.append(f"SPAWN {best_c} {others[0]} {others[1]}")
-            locked_end[best_c] = locked_end.get(best_c, 0) + 1
-            spawn_houses[best_c] += 1
-        for t in sub:
-            if t in cands:
-                cands.remove(t)
-        for src, dst, take in moves:
-            avail[src] -= take
-            avail_total -= take
-            locked_end[dst] = locked_end.get(dst, 0) + take
-            en_route[dst] = en_route.get(dst, 0) + take
-            if opp.get(dst, 0) > 0 and my.get(dst, 0) + take > opp.get(dst, 0):
-                CONTESTED.add(dst)
-            if src != dst:
-                cmds.append(f"MOVE {src} {dst} {take}")
+    # ---------------- SPAWN ----------------
+    spawn_tris = []
+    if turn <= P["FREE_SPAWN_TURNS"]:
+        cap = 10**6
     else:
-        spawned_corners = set()
-        for corners in to_spawn:
-            options = [c for c in corners if c not in spawned_corners] or list(corners)
-            best_c = max(
-                options,
-                key=lambda c: (
-                    c in home_side,
-                    -min(my.get(c, 0), 3),  # prefer emptier corners — no spawn piles
-                    cand_home_deg[c],
-                    cand_any_deg[c],
-                    -blocked_deg[c],
-                    corner_deg[c],
-                    -opp.get(c, 0),
-                ),
-            )
-            others = [c for c in corners if c != best_c]
-            cmds.append(f"SPAWN {best_c} {others[0]} {others[1]}")
-            locked_end[best_c] = locked_end.get(best_c, 0) + 1
-            spawn_houses[best_c] += 1
-            spawned_corners.add(best_c)
+        cap = max(P["CAP_MIN"], oarmy * P["CAP_MUL"] + P["CAP_ADD"])
+    cap = min(cap, P["CAP_MAX"])
+    for i in range(T):
+        if owner[i] == 0 and not used[i] and army + len(spawn_tris) < cap:
+            spawn_tris.append(i)
+            used[i] = True
 
-    forbidden_end = set()
-    for rt in resettable_tris:
-        if all(locked_end.get(c, 0) == 0 for c in rt):
-            forbidden_end.update(rt)
+    # ---------------- threat maps ----------------
+    # houses the enemy can ATTACK next turn: triangles it owns, or can capture this
+    # turn (it attacks from fresh captures right away), with its units on the corners
+    danger = [0.0] * N
+    for i in range(T):
+        cs = tri_c[i]
+        if owner[i] == 1:
+            if all(op[c] >= 1 for c in cs):
+                w = 1.0
+            elif all(op[c] >= 1 or any(op[n] >= 1 for n in nb[c]) for c in cs):
+                w = 0.7
+            else:
+                continue
+        elif (
+            opcap[i]
+            and (op[cs[0]] >= 1) + (op[cs[1]] >= 1) + (op[cs[2]] >= 1) >= 2
+            and all(op[c] >= 1 or any(op[n] >= 1 for n in nb[c]) for c in cs)
+        ):
+            w = P["DANGER_CAP"]
+        else:
+            continue
+        for h in tri_nb[i]:
+            if danger[h] < w:
+                danger[h] = w
+    oreach = [op[h] + sum(op[n] for n in nb[h]) for h in range(N)]
 
-    # 4B. REFILL spawn-ready corners BEFORE captures: owned triangles with an empty corner
-    # cannot SPAWN (spawn needs >= 1 unit on every corner). This is the spawn engine —
-    # without refill the engine dies and we stop growing (how Arnaud.Net outran us).
-    # PHASE DISCIPLINE: only refill phase-2 triangles (their spawn turn is next) —
-    # phase-1 triangles are in their vacate turn and must stay EMPTY (me_cap reset),
-    # phase-0 triangles spawn right now (too late to staff).
-    engine_tris = [
-        t[:3]
-        for t in owned
-        if t[:3] not in used_tris and phase_of(t[:3]) == 2
-    ]
-    # Sort engines: fewest missing corners first (cheapest to make spawn-ready)
-    engine_tris.sort(
-        key=lambda cs: (
-            sum(1 for c in cs if locked_end.get(c, 0) == 0),
-            -tri_hub[cs][0],
-            -tri_hub[cs][1],
-        )
-    )
-    for cs in engine_tris:
-        if avail_total <= 0:
-            break
-        for c in cs:
-            if locked_end.get(c, 0) == 0 and avail_total > 0:
-                # Few engines left -> unlimited reach, we MUST bring the engine back online
-                reach = 999 if len(engine_tris) <= 2 else 3
-                srcs = [u for u in houses if avail.get(u, 0) > 0 and dist(u, c) <= reach and (u != c or u not in must_vacate)]
-                if srcs:
-                    srcs.sort(key=lambda u: (dist(u, c), -avail[u]))
-                    u = srcs[0]
-                    avail[u] -= 1
-                    avail_total -= 1
-                    step = first_step(u, c)
-                    locked_end[step] = locked_end.get(step, 0) + 1
-                    if u != c:
-                        cmds.append(f"MOVE {u} {c} 1")
-                    if dist(u, c) > 1:
-                        en_route[c] = en_route.get(c, 0) + 1
-                    else:
-                        locked_end[c] = locked_end.get(c, 0) + 1
-
-    # 4B1. PUNISH: enemy just neutralized a triangle (their ATTACK or their own
-    # SPAWN) — it is now neutral with WEAKENED/vacating corners. Capturing it
-    # immediately is cheap and punishes their attack (AdrienGI attacked 13x/game
-    # for free — this makes every attack cost them a triangle).
-    # Runs BEFORE FOCUS: punishing the attacker beats chasing our own plan.
-    punish_tris = [
-        cs
-        for cs, own in LAST_OWNER.items()
-        if own == 1 and owner_now.get(cs, -1) != 1 and me_cap_now.get(cs, False)
-    ]
-    for cs in punish_tris:
-        for c in cs:
-            deficit = (opp.get(c, 0) + 1) - my.get(c, 0) - locked_end.get(c, 0) - en_route.get(c, 0)
-            while deficit > 0 and avail_total > 0:
-                srcs = [
-                    u
-                    for u in houses
-                    if avail.get(u, 0) > 0
-                    and u != c
-                    and first_step(u, c) not in forbidden_end
-                ]
-                if not srcs:
-                    break
-                srcs.sort(key=lambda u: (dist(u, c), risky(u), -avail[u]))
-                u = srcs[0]
-                take = min(avail[u], deficit)
-                avail[u] -= take
-                avail_total -= take
-                deficit -= take
-                en_route[c] = en_route.get(c, 0) + take
-                step = first_step(u, c)
-                locked_end[step] = locked_end.get(step, 0) + 1
-                if u != c:
-                    cmds.append(f"MOVE {u} {c} {take}")
-
-    # 4B2. FOCUS commitment: serve the sticky target's deficits BEFORE other
-    # captures so units converge instead of wandering (loick/Arnaud commit
-    # instantly; our turn-by-turn re-targeting lost the early game).
-    if focus_cs is not None:
-        ft = next((t for t in tris if t[:3] == focus_cs), None)
-        if ft is not None and ft[4]:
-            for c in ft[:3]:
-                deficit = (opp.get(c, 0) + 1) - my.get(c, 0) - locked_end.get(c, 0) - en_route.get(c, 0)
-                while deficit > 0 and avail_total > 0:
-                    srcs = [
-                        u
-                        for u in houses
-                        if avail.get(u, 0) > 0
-                        and u != c
-                        and first_step(u, c) not in forbidden_end
-                    ]
-                    if not srcs:
-                        break
-                    srcs.sort(key=lambda u: (dist(u, c), risky(u), -avail[u]))
-                    u = srcs[0]
-                    take = min(avail[u], deficit)
-                    avail[u] -= take
-                    avail_total -= take
-                    deficit -= take
-                    en_route[c] = en_route.get(c, 0) + take
-                    step = first_step(u, c)
-                    locked_end[step] = locked_end.get(step, 0) + 1
-                    if u != c:
-                        cmds.append(f"MOVE {u} {c} {take}")
-
-    # 4C. Greedy assignment for remaining triangles.
-    # Swarm doctrine: stay_home ONLY while strictly behind in units — ahead or
-    # even, we keep the whole army capturing instead of idling at home.
-    stay_home = opp_army > army
-    max_allowed_d = 2 if (stay_home and best_imm is not None) else 999
-
-    # REBUILD MODE: when we own NO triangles (scoring base wiped by opponent ATTACK),
-    # drop all territorial restrictions and throw everything at the single fastest capturable
-    # triangle — restoring the spawn engine matters more than safety or position.
-    # (Only after the game has progressed — at turn 1 nothing is owned by anyone yet.)
-    rebuild = len(owned) == 0 and cands and (my_score > 0 or opp_score > 0) and army > 0
-    if rebuild:
-        stay_home = False
-        max_allowed_d = 999
-        src_houses = [u for u in houses if avail.get(u, 0) > 0]
-        if src_houses:
-            cands.sort(
-                key=lambda t: (
-                    max(min(dist(u, c) for u in src_houses) for c in t[:3]),
-                    -tri_hub[t[:3]][0],
-                )
-            )
-        cands = cands[:1]
-
-    while avail_total > 0 and cands:
+    # ---------------- assignment: units -> corners of capturable triangles ----------------
+    free = my[:]  # free units per house
+    assigned_to = {}  # corner -> units assigned
+    plan = []  # (src_house, corner, count, wait_adjacent)
+    # capturable now, or waiting for its corners to empty (capturable in 2 turns)
+    cand = [i for i in range(T) if owner[i] != 0 and not used[i]]
+    MAXD = P["MAXD"]
+    while cand and sum(free) > 0:
         best = None
-        active_srcs = [h for h, cnt in avail.items() if cnt > 0]
-        # HARD trap avoidance: if ANY non-trap capture is possible, skip trap-risky
-        # ones entirely — walking into an unbroken enemy ATTACK loses the whole stack.
-        non_trap_exists = any(not trap_risk(t) for t in cands)
-        # End-of-turn position estimate: units stay put or land on first_step of their move.
-        # MUST include en_route (units committed by earlier assignments this turn) —
-        # otherwise two triangles sharing a hub each "see" an empty hub and both send
-        # units there → cross-triangle pile (the 10-unit ATTACK kill vs AdrienGI).
-        # Prevents unknowingly parking a pile on a house the opponent can ATTACK next round.
-        parked = {
-            h: my.get(h, 0) + spawn_houses.get(h, 0) + en_route.get(h, 0)
-            for h in houses
-        }
-        for t in cands:
-            corners = t[:3]
-            if stay_home and best_imm is not None and not all(c in home_side for c in corners):
-                continue
-            if non_trap_exists and trap_risk(t):
-                continue
-            temp_avail = dict(avail)
-            temp_parked = dict(parked)
-            temp_locked = dict(locked_end)
-            moves = []
-            max_d = 0
-            sum_d = 0
-            total_req = 0
+        for i in cand:
+            comp = 0 if mecap[i] else 2
+            cost = 0
             ok = True
-            ordered_corners = sorted(
-                corners,
-                key=lambda c: sum(temp_avail.get(u, 0) for u in active_srcs if dist(u, c) <= 2),
-            )
-            for target in ordered_corners:
-                need = (
-                    (opp.get(target, 0) + 1)
-                    - temp_locked.get(target, 0)
-                    - en_route.get(target, 0)
-                )
-                if need <= 0:
+            for c in tri_c[i]:
+                r = op[c] + 1 - assigned_to.get(c, 0)
+                if r <= 0:
                     continue
-                rem = need
-                by_d = sorted(
-                    active_srcs,
-                    key=lambda h: (
-                        dist(h, target),
-                        0 if (h in must_vacate and h != target) else 1,
-                        -temp_avail.get(h, 0),
-                    ),
-                )
-                for h in by_d:
-                    cnt = temp_avail.get(h, 0)
-                    if cnt <= 0:
+                dc = 0
+                for h in order_from[c]:
+                    f = free[h]
+                    if f <= 0:
                         continue
-                    d = dist(h, target)
-                    if d > max_allowed_d:
+                    dh = dist[c][h]
+                    take = f if f < r else r
+                    r -= take
+                    cost += dh * take
+                    dc = dh
+                    if r <= 0:
                         break
-                    step = first_step(h, target)
-                    if d > 1 and step in forbidden_end:
-                        continue
-                    # GLOBAL cap 2 units per house: swarm opponents (AdrienGI)
-                    # attack EVERY stack they can reach, 2-6 units per attack,
-                    # every turn. A 3-6 stack is a gift to them; a 2-stack loses
-                    # at most 2. Captures of contested corners complete over two
-                    # turns instead of one — slower but the army survives.
-                    if d > 1 and temp_parked.get(step, 0) >= 2 and step != target:
-                        continue
-                    if temp_parked.get(target, 0) >= 2 and opp.get(target, 0) > 0:
-                        # contested corner already saturated this turn — wait
-                        continue
-                    take = cnt if cnt < rem else rem
-                    temp_avail[h] = cnt - take
-                    temp_parked[h] = temp_parked.get(h, 0) - take
-                    temp_parked[step] = temp_parked.get(step, 0) + take
-                    rem -= take
-                    total_req += take
-                    moves.append((h, target, take, d))
-                    if d > max_d:
-                        max_d = d
-                    sum_d += d * take
-                    if rem == 0:
-                        break
-                if rem > 0:
+                if r > 0 or dc > MAXD:
                     ok = False
                     break
-                arrived = sum(tk for h, tg, tk, d in moves if tg == target and d <= 1)
-                temp_locked[target] = temp_locked.get(target, 0) + arrived
+                if dc > comp:
+                    comp = dc
             if not ok:
                 continue
-            adj_t, deg_sum = tri_hub[corners]
-            shared_ready = sum(1 for c in corners if locked_end.get(c, 0) > opp.get(c, 0))
-            is_home = 0 if all(c in home_side for c in corners) else 1
-            # Contested captures (any corner with enemy units) build stacks the
-            # swarm opponents hunt with ATTACK (AdrienGI: 25 of our units killed
-            # this way). Prefer uncontested captures when available.
-            contested = 1 if any(opp.get(c, 0) > 0 for c in corners) else 0
-            score = (
-                0 if max_d <= 1 else max_d,
-                trap_risk(t),
-                contested,
-                is_home,
-                total_req if max_d <= 1 else 0,
-                -shared_ready if max_d <= 1 else 0,
-                total_req,
-                0 if t[3] == 1 else 1,
-                -adj_t,
-                -deg_sum,
-                sum_d,
-            )
-            if best is None or score < best[0]:
-                best = (score, moves, t, total_req, max_d)
+            contested = sum(1 for c in tri_c[i] if op[c] > 0 or danger[c] > 0)
+            key = (comp + P["CONTEST_D"] * contested, 0 if owner[i] == 1 else 1, cost)
+            if best is None or key < best[0]:
+                best = (key, i)
         if best is None:
             break
-        _, moves, t, total_req, max_d = best
-        cands.remove(t)
-        avail_total -= total_req
-        for src, dst, take, d in moves:
-            avail[src] -= take
-            en_route[dst] = en_route.get(dst, 0) + take
-            step = first_step(src, dst)
-            if max_d > 1 and src == dst and src in must_vacate:
-                avail[src] += take
-                avail_total += take
+        i = best[1]
+        cand.remove(i)
+        for c in tri_c[i]:
+            r = op[c] + 1 - assigned_to.get(c, 0)
+            if r <= 0:
                 continue
-            locked_end[step] = locked_end.get(step, 0) + take
-            # Capture over enemy units → this house becomes a hunt target for
-            # swarm opponents (AdrienGI attacks our capture forces turn after
-            # turn). Mark it: next turn the excess must dissolve.
-            if d <= 1 and opp.get(dst, 0) > 0 and my.get(dst, 0) + take > opp.get(dst, 0):
-                CONTESTED.add(dst)
-            if src != dst:
-                cmds.append(f"MOVE {src} {dst} {take}")
-
-    # 4D. Stage any remaining units (`avail`) toward the BEST local uncaptured triangle on `home_side`,
-    # assigning 1 unit per needed corner of that triangle before moving on to the next triangle!
-    rem_units = []
-    for src in sorted(avail):
-        rem_units.extend([src] * avail[src])
-
-    if rebuild:
-        local_cands = list(cands)
-    else:
-        home_cands = [t for t in cands if all(c in home_side for c in t[:3])]
-        local_cands = home_cands if (stay_home and home_cands) else list(cands)
-
-    if rem_units and local_cands:
-        local_cands.sort(
-            key=lambda t: (
-                0 if all(c in home_side for c in t[:3]) else 1,
-                max(min(dist(u, c) for u in rem_units) if locked_end.get(c, 0) <= opp.get(c, 0) else 0 for c in t[:3]),
-                sum(min(dist(u, c) for u in rem_units) if locked_end.get(c, 0) <= opp.get(c, 0) else 0 for c in t[:3]),
-                -tri_hub[t[:3]][0],
-                -tri_hub[t[:3]][1],
-            )
-        )
-        staged_targets = set()
-        for t in local_cands:
-            if not rem_units:
-                break
-            for c in t[:3]:
-                if c in staged_targets:
+            for h in order_from[c]:
+                f = free[h]
+                if f <= 0:
                     continue
-                # en_route: units already committed (greedy/imm) that arrive next turn
-                need = (opp.get(c, 0) + 1) - locked_end.get(c, 0) - en_route.get(c, 0)
-                while need > 0 and rem_units:
-                    valid_u = []
-                    for u in set(rem_units):
-                        if u == c and u in must_vacate:
-                            continue
-                        step = first_step(u, c)
-                        if step in forbidden_end:
-                            continue
-                        if stay_home and step not in home_side and u in home_side:
-                            continue
-                        # no pass-through parking on 3+ piles (czuk scenario)
-                        if step != c and my.get(step, 0) + locked_end.get(step, 0) >= 3:
-                            continue
-                        valid_u.append(u)
-                    if not valid_u:
-                        break
-                    best_u = min(
-                        valid_u,
-                        key=lambda u: (
-                            dist(first_step(u, c), c),
-                            locked_end.get(first_step(u, c), 0),
-                            dist(u, c),
-                            u not in must_vacate,
-                        ),
-                    )
-                    rem_units.remove(best_u)
-                    step = first_step(best_u, c)
-                    locked_end[step] = locked_end.get(step, 0) + 1
-                    if dist(best_u, c) > 1:
-                        # committed en route — arrives in a later turn
-                        en_route[c] = en_route.get(c, 0) + 1
-                    need -= 1
-                    if best_u != c:
-                        cmds.append(f"MOVE {best_u} {c} 1")
-                if need <= 0:
-                    staged_targets.add(c)
+                take = f if f < r else r
+                free[h] -= take
+                r -= take
+                assigned_to[c] = assigned_to.get(c, 0) + take
+                plan.append((h, c, take, not mecap[i]))
+                if r <= 0:
+                    break
 
-    # 5B. Capture ALL currently-OWNED triangles (`owner == 0`) whose corners we can fully staff this turn
-    # so they keep scoring! Their units stay on the corners (no `me_cap` reset needed since owner==0 already).
-    scoring_hold = [t[:3] for t in owned if t[:3] not in used_tris]
-    for cs in scoring_hold:
-        for c in cs:
-            if locked_end.get(c, 0) == 0 and rem_units:
-                # Prefer a unit already adjacent (d<=1) so it stays on the corner this turn
-                valid_u = [u for u in set(rem_units) if dist(u, c) <= 1 and (u != c or u not in must_vacate)]
-                if valid_u:
-                    best_u = min(valid_u, key=lambda u: (dist(u, c), u not in must_vacate))
-                    rem_units.remove(best_u)
-                    step = first_step(best_u, c)
-                    locked_end[step] = locked_end.get(step, 0) + 1
-                    if best_u != c:
-                        cmds.append(f"MOVE {best_u} {c} 1")
+    # idle pull: nearest corner of any triangle we do not own
+    tgt_idle = set()
+    for i in range(T):
+        if owner[i] != 0 and not used[i]:
+            tgt_idle.update(tri_c[i])
+    fd = [99] * N
+    q = deque()
+    for h in tgt_idle:
+        fd[h] = 0
+        q.append(h)
+    while q:
+        u = q.popleft()
+        for v in nb[u]:
+            if fd[v] == 99:
+                fd[v] = fd[u] + 1
+                q.append(v)
 
-    # 5C. Reinforce threatened border corners of captured triangles if spare units remain adjacent
-    if best_imm is not None and rem_units:
-        _, sub, _, _ = best_imm
-        for t in sub:
-            for c in t[:3]:
-                if opp_reach1.get(c, 0) > opp.get(c, 0) and locked_end.get(c, 0) == opp.get(c, 0) + 1:
-                    valid_u = [u for u in set(rem_units) if dist(u, c) <= 1 and (u != c or u not in must_vacate)]
-                    if valid_u:
-                        best_u = min(valid_u, key=lambda u: (u not in must_vacate, dist(u, c)))
-                        rem_units.remove(best_u)
-                        locked_end[c] = locked_end.get(c, 0) + 1
-                        if best_u != c:
-                            cmds.append(f"MOVE {best_u} {c} 1")
+    WU, WK, EXP, SPR, EXP2 = P["WU"], P["WK"], P["EXP"], P["SPR"], P["EXP2"]
+    V_CAP, V_STEAL, V_LOSE = P["V_CAP"], P["V_STEAL"], P["V_LOSE"]
+    V_OPPCAP, V_RESET, V_RPART, V_PART = P["V_OPPCAP"], P["V_RESET"], P["V_RPART"], P["V_PART"]
+    THREAT, FW, FWI, SURR = P["THREAT"], P["FW"], P["FW_IDLE"], P["SURR"]
+    P_CONT = P["P_CONT"]
+    RISK = P["RISK"] * WU
+    RISK_NET = P["RISK_NET"]
+    oadj = [min(sum(op[n] for n in nb[x]), P["OADJ_MAX"]) for x in range(N)]
 
-    # 6. Any units still on `must_vacate` (or still idle on `home_side`) step to a safe, non-forbidden `home_side` HUB corner!
-    # PLUS anti-ATTACK spread: never keep more than 2 of our units on a house that
-    # sits in the blast radius of an opponent-ready triangle (czuk killed 6 with one ATTACK).
-    for src in rem_units:
-        neighs = list(adj.get(src, ()))
-        excess = 0
-        if src in attack_danger:
-            excess = max(excess, my.get(src, 0) - 2)
-        if risky(src) >= 2:
-            # surround risk: all neighbours (nearly) opponent-owned — keep 1, flee
-            excess = max(excess, my.get(src, 0) - 1)
-        if src in CONTESTED:
-            # Our capture force sits on a house we took over enemy units — swarm
-            # opponents (AdrienGI) hunt exactly these stacks with ATTACK next turn.
-            # Dissolve: keep 2, scatter the rest.
-            excess = max(excess, my.get(src, 0) - 2)
-        # PREDICTIVE surround: if the opponent could out-stock EVERY neighbour next
-        # turn (their reach-1 army beats our presence), this house becomes a kill
-        # pocket — flee now, before the encirclement closes (Rikus/ChuOkupai kill 4-9
-        # units per turn this way).
-        if neighs and all(
-            opp_reach1.get(m, 0) > my.get(m, 0) for m in neighs
-        ):
-            excess = max(excess, my.get(src, 0) - 1)
-        must_move = (
-            src in must_vacate
-            or src not in home_side
-            or corner_deg.get(src, 0) == 0
-            or locked_end.get(src, 0) >= 2
-            or excess > 0
-        )
-        if neighs and must_move:
-            # Which triangle is this unit vacating? Prefer parking that stays
-            # adjacent to that triangle's OTHER corners — at the next staffing
-            # phase (2 turns later) the unit steps right back in and the spawn
-            # cycle continues without a dead turn.
-            vacating_tris = [
-                cs for cs in resettable_tris if src in cs
-            ] + [cs for cs in to_spawn if src in cs]
-            park_bonus = set()
-            for cs in vacating_tris[:2]:
-                for other in cs:
-                    if other != src:
-                        park_bonus |= adj.get(other, set())
-            dst = min(
-                neighs,
-                key=lambda n: (
-                    n in forbidden_end,
-                    n not in home_side if stay_home else False,
-                    corner_deg.get(n, 0) == 0,
-                    n in must_vacate,
-                    0 if n in park_bonus else 1,
-                    1 if (n in attack_danger and locked_end.get(n, 0) >= 2) else 0,
-                    opp.get(n, 0) > locked_end.get(n, 0) + 1,
-                    -cand_home_deg[n],
-                    -corner_deg.get(n, 0),
-                    locked_end.get(n, 0),
-                ),
-            )
-            locked_end[dst] = locked_end.get(dst, 0) + 1
-            cmds.append(f"MOVE {src} {dst} 1")
-            if excess > 0:
-                my[src] = my.get(src, 0) - 1
-                excess -= 1
+    # ---------------- unit tokens ----------------
+    cnt = [0] * N
+    tok_origin = []
+    tok_pos = []
+    tok_opts = []
+    tok_spawn = []
+    tok_tgt = []
+    tok_wait = []
+    for h, c, n, w in plan:
+        for _ in range(n):
+            tok_origin.append(h)
+            tok_pos.append(h)
+            tok_opts.append([h] + nb[h])
+            tok_spawn.append(-1)
+            tok_tgt.append(c)
+            tok_wait.append(w)
+            cnt[h] += 1
+    for h in range(N):
+        for _ in range(free[h]):
+            tok_origin.append(h)
+            tok_pos.append(h)
+            tok_opts.append([h] + nb[h])
+            tok_spawn.append(-1)
+            tok_tgt.append(-1)
+            tok_wait.append(False)
+            cnt[h] += 1
+    for i in spawn_tris:
+        cs = tri_c[i]
+        best = min(cs, key=lambda c: (cnt[c], fd[c]))
+        tok_origin.append(-1)
+        tok_pos.append(best)
+        tok_opts.append(list(cs))
+        tok_spawn.append(i)
+        tok_tgt.append(-2)
+        tok_wait.append(False)
+        cnt[best] += 1
 
-    ui = f"v={army} t={len(owned)}"
-    # Persist owner state for next turn's punish detection
-    for t in tris:
-        LAST_OWNER[t[:3]] = t[3]
-    print(("MSG " + ui + ";" + ";".join(cmds)) if cmds else ("MSG " + ui), flush=True)
+    def tok_val(k, p):
+        t = tok_tgt[k]
+        if t >= 0:
+            d = dist[p][t]
+            if tok_wait[k]:
+                d = d - 1 if d > 0 else 1
+            return -FW * d
+        if t == -1:
+            d = fd[p]
+            return -FWI * d if d < 99 else 0.0
+        return 0.0
+
+    def owner_of(x):
+        ns = nb[x]
+        if all(cnt[n] > op[n] for n in ns):
+            return 0
+        if all(op[n] > cnt[n] for n in ns):
+            return 1
+        if cnt[x] > op[x]:
+            return 0
+        if op[x] > cnt[x]:
+            return 1
+        return -1
+
+    def house_term(x):
+        c = cnt[x]
+        o = op[x]
+        v = 0.0
+        ns = nb[x]
+        if c > 0:
+            if all(op[n] > cnt[n] for n in ns):
+                v -= WU * c
+            else:
+                if c >= 2 and danger[x] > 0:
+                    v -= danger[x] * (EXP * c if c >= 3 else EXP2 * c)
+                if all(oreach[n] > cnt[n] for n in ns):
+                    v -= SURR * c
+                if risk[x] > 0 and c > RISK_NET:
+                    v -= RISK * (c - RISK_NET) * pk[c if c < 5 else 5] * risk[x]
+                need = o + 1
+                if c > need:
+                    s = c - need
+                    v -= SPR * s * s
+        if o > 0 and all(cnt[n] > op[n] for n in ns):
+            v += WK * o
+        return v
+
+    def tri_term(i, own):
+        a, b, c = tri_c[i]
+        oa, ob, oc = own[a], own[b], own[c]
+        if used[i]:
+            so, sm = -1, False
+        else:
+            so, sm = owner[i], mecap[i]
+        if so == 0:
+            if oa == 1 and ob == 1 and oc == 1:
+                return -V_LOSE
+            if oa != 0 and ob != 0 and oc != 0 and oreach[a] > cnt[a] and oreach[b] > cnt[b] and oreach[c] > cnt[c]:
+                return -THREAT
+            return 0.0
+        v = 0.0
+        if sm:
+            mine = (oa == 0) + (ob == 0) + (oc == 0)
+            if mine == 3:
+                v = V_STEAL if so == 1 else V_CAP
+                for x in (a, b, c):
+                    if oadj[x] > 0 and cnt[x] - op[x] <= oadj[x]:
+                        v *= P_CONT
+                return v
+            v += V_PART * mine
+        elif not used[i]:
+            e = (cnt[a] == 0) + (cnt[b] == 0) + (cnt[c] == 0)
+            v += V_RESET if e == 3 else V_RPART * e
+        if so == -1 and opcap[i] and oa == 1 and ob == 1 and oc == 1:
+            v -= V_OPPCAP
+        return v
+
+    own = [owner_of(x) for x in range(N)]
+    hv = [house_term(x) for x in range(N)]
+    tv = [tri_term(i, own) for i in range(T)]
+
+    def affected(houses):
+        if len(houses) == 2:
+            p, qq = houses
+            key = p * 64 + qq
+            r = pair_cache.get(key)
+            if r is None:
+                r = (sorted(set(aff_h[p]) | set(aff_h[qq])), sorted(set(aff_t[p]) | set(aff_t[qq])))
+                pair_cache[key] = r
+            return r
+        H = set()
+        TS = set()
+        for x in houses:
+            H.update(aff_h[x])
+            TS.update(aff_t[x])
+        return H, TS
+
+    def eval_moves(mv):
+        """mv: list of (token, new_pos). Returns (delta, state) without committing."""
+        hs = []
+        dtok = 0.0
+        for k, qq in mv:
+            p = tok_pos[k]
+            hs.append(p)
+            hs.append(qq)
+            dtok += tok_val(k, qq) - tok_val(k, p)
+        H, TS = affected(hs)
+        before = 0.0
+        for x in H:
+            before += hv[x]
+        for i in TS:
+            before += tv[i]
+        for k, qq in mv:
+            cnt[tok_pos[k]] -= 1
+            cnt[qq] += 1
+        own2 = own[:]
+        for x in H:
+            own2[x] = owner_of(x)
+        after = 0.0
+        nh = []
+        for x in H:
+            v = house_term(x)
+            nh.append(v)
+            after += v
+        nt = []
+        for i in TS:
+            v = tri_term(i, own2)
+            nt.append(v)
+            after += v
+        for k, qq in mv:
+            cnt[tok_pos[k]] += 1
+            cnt[qq] -= 1
+        return after - before + dtok, (H, TS, own2, nh, nt)
+
+    def commit(mv, state):
+        H, TS, own2, nh, nt = state
+        for k, qq in mv:
+            cnt[tok_pos[k]] -= 1
+            cnt[qq] += 1
+            tok_pos[k] = qq
+        for j, x in enumerate(H):
+            own[x] = own2[x]
+            hv[x] = nh[j]
+        for j, i in enumerate(TS):
+            tv[i] = nt[j]
+
+    budget = P["BUDGET"]
+    ntok = len(tok_pos)
+
+    # initial greedy: every assigned unit takes its first step if it does not hurt
+    for k in range(ntok):
+        t = tok_tgt[k]
+        if t < 0 or time.perf_counter() - t_start > budget:
+            continue
+        p = tok_pos[k]
+        if p == t or (tok_wait[k] and dist[p][t] <= 1):
+            continue
+        step = min((n for n in nb[p]), key=lambda n: (dist[n][t], n))
+        d, st = eval_moves([(k, step)])
+        if d > -2.0:
+            commit([(k, step)], st)
+
+    def single_pass():
+        improved = False
+        seen = set()
+        for k in range(ntok):
+            if time.perf_counter() - t_start > budget:
+                return improved
+            p = tok_pos[k]
+            key = (tok_origin[k], p, tok_spawn[k], tok_tgt[k])
+            if key in seen:
+                continue
+            best_d = 1e-6
+            best = None
+            for qq in tok_opts[k]:
+                if qq == p:
+                    continue
+                d, st = eval_moves([(k, qq)])
+                if d > best_d:
+                    best_d = d
+                    best = ([(k, qq)], st)
+            if best is not None:
+                commit(*best)
+                improved = True
+                seen = set()
+            else:
+                seen.add(key)
+        return improved
+
+    def composite_pass():
+        improved = False
+        for i in range(T):
+            if time.perf_counter() - t_start > budget:
+                return improved
+            if used[i] or owner[i] == 0 or not mecap[i]:
+                continue
+            cs = tri_c[i]
+            missing = [c for c in cs if own[c] != 0]
+            if not missing:
+                continue
+            mv = []
+            taken = set()
+            ok = True
+            for c in missing:
+                r = op[c] + 1 - cnt[c]
+                if r <= 0:
+                    r = 1
+                cands_k = [
+                    k
+                    for k in range(ntok)
+                    if k not in taken and tok_pos[k] != c and tok_pos[k] not in cs and c in tok_opts[k]
+                ]
+                cands_k.sort(key=lambda k: (-(cnt[tok_pos[k]] - op[tok_pos[k]]), tok_tgt[k] >= 0))
+                if len(cands_k) < r:
+                    ok = False
+                    break
+                for k in cands_k[:r]:
+                    taken.add(k)
+                    mv.append((k, c))
+            if not ok or not mv:
+                continue
+            d, st = eval_moves(mv)
+            if d > 1e-6:
+                commit(mv, st)
+                improved = True
+        # vacate: empty all corners of a waiting triangle (or a whole connected group
+        # of waiting triangles sharing corners) at once so they become capturable
+        for cs in vacate_sets:
+            if time.perf_counter() - t_start > budget:
+                return improved
+            if sum(cnt[c] for c in cs) == 0:
+                continue
+            mv = []
+            ok = True
+            extra = {}
+            for k in range(ntok):
+                p = tok_pos[k]
+                if p not in cs:
+                    continue
+                outs = [x for x in tok_opts[k] if x not in cs]
+                if not outs:
+                    ok = False
+                    break
+                dst = max(outs, key=lambda x: (-(cnt[x] + extra.get(x, 0) > op[x]), tok_val(k, x), -cnt[x] - extra.get(x, 0)))
+                extra[dst] = extra.get(dst, 0) + 1
+                mv.append((k, dst))
+            if not ok or not mv or len(mv) > 12:
+                continue
+            d, st = eval_moves(mv)
+            if d > 1e-6:
+                commit(mv, st)
+                improved = True
+        return improved
+
+    waiting = [i for i in range(T) if not used[i] and owner[i] != 0 and not mecap[i]]
+    vacate_sets = [set(tri_c[i]) for i in waiting]
+    # connected groups of waiting triangles (shared corners)
+    seen_w = set()
+    for i in waiting:
+        if i in seen_w:
+            continue
+        comp = {i}
+        stack = [i]
+        seen_w.add(i)
+        while stack:
+            j = stack.pop()
+            for c in tri_c[j]:
+                for k2 in tris_of[c]:
+                    if k2 not in seen_w and k2 in waiting:
+                        seen_w.add(k2)
+                        comp.add(k2)
+                        stack.append(k2)
+        if len(comp) > 1:
+            g = set()
+            for j in comp:
+                g.update(tri_c[j])
+            vacate_sets.append(g)
+    vacate_sets.sort(key=len, reverse=True)
+
+    passes = 0
+    while passes < 8 and time.perf_counter() - t_start < budget:
+        passes += 1
+        a = single_pass()
+        b = composite_pass()
+        if not a and not b:
+            break
+
+    # ---------------- output ----------------
+    # two spawns on one house would both die to a single ATTACK
+    spawn_at = set()
+    for k in range(ntok):
+        if tok_spawn[k] < 0:
+            continue
+        p = tok_pos[k]
+        if p in spawn_at:
+            alts = [x for x in tok_opts[k] if x not in spawn_at]
+            if alts:
+                p = min(alts, key=lambda x: (cnt[x], fd[x]))
+                cnt[tok_pos[k]] -= 1
+                cnt[p] += 1
+                tok_pos[k] = p
+        spawn_at.add(p)
+    moves = {}
+    for k in range(ntok):
+        if tok_spawn[k] >= 0:
+            i = tok_spawn[k]
+            sp = tok_pos[k]
+            others = [c for c in tri_c[i] if c != sp]
+            cmds.append(f"SPAWN {sp} {others[0]} {others[1]}")
+        elif tok_pos[k] != tok_origin[k]:
+            key = (tok_origin[k], tok_pos[k])
+            moves[key] = moves.get(key, 0) + 1
+    for (a, b), n in sorted(moves.items()):
+        cmds.append(f"MOVE {a} {b} {n}")
+    our_atk = []
+    our_sp = []
+    for c in cmds:
+        f = c.split()
+        if f[0] == "ATTACK":
+            our_atk.append(tuple(int(x) for x in f[1:5]))
+        elif f[0] == "SPAWN":
+            our_sp.append(int(f[1]))
+    prev = (my0, op0, owner, opcap, [(a, b, n) for (a, b), n in moves.items()], our_sp, our_atk)
+    ms = int((time.perf_counter() - t_start) * 1000)
+    cmds.insert(0, f"MSG u{army} t{sum(1 for o in owner if o == 0)} {ms}ms p{passes} "
+                   f"a{pk[2]:.2f}/{pk[3]:.2f}/{pk[4]:.2f} k{keep:.2f} c{act:.1f} x{len(opp_attacks)}")
+    print(";".join(cmds), flush=True)

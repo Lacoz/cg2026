@@ -274,3 +274,85 @@ class czukRegressionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def adriengi_commands(board, rng):
+    """Port AdrienGI spravania (z logov 916495173): mass-spawn na vsetky own tri,
+    vsetky jednotky sa hybu kazdy tah k najblisiemu capturable rohu, ATTACK na
+    stacks >= 3 v dosahu."""
+    my = {n: board.units[n][1] for n in board.coords}
+    opp = {n: board.units[n][0] for n in board.coords}
+    cells = []
+    for n in my:
+        cells += [n] * my[n]
+
+    def dst(a, c):
+        return board.bfs_dist(c).get(a, 999)
+
+    cmds = []
+
+    # 1. ATTACK: ready tri -> biggest enemy stack adjacent (kills 2-6/turn)
+    ready = [t for t in board.triangles if t.owner == 1 and all(my.get(c, 0) > 0 for c in t.corners())]
+    for t in ready:
+        cs = t.corners()
+        best_n, best_k = None, 0
+        for c in cs:
+            for n in board.adj.get(c, ()):
+                if opp.get(n, 0) > best_k:
+                    best_k, best_n = opp[n], n
+        if best_n is not None and best_k >= 2:
+            a, b, c3 = cs
+            cmds.append(f"ATTACK {a} {b} {c3} {best_n}")
+            opp[best_n] = 0
+            used = set(cs)
+            break
+
+    # 2. MASS SPAWN on every owned triangle (their doctrine)
+    for t in board.triangles:
+        if t.owner == 1 and t.corners() not in [tuple(cmds_i.split()[1:4]) for cmds_i in []]:
+            pass
+    spawned = set()
+    for t in board.triangles:
+        cs = t.corners()
+        if t.owner == 1 and cs not in spawned and all(my.get(c, 0) > 0 for c in cs):
+            a, b, c3 = cs
+            cmds.append(f"SPAWN {a} {b} {c3}")
+            spawned.add(cs)
+            my[a] += 1
+
+    # 3. Assign every unit to the nearest capturable triangle corner (parallel!)
+    capturable = [
+        t.corners()
+        for t in board.triangles
+        if t.owner != 1 and t.can_capture[1]
+    ]
+    used_cells = []
+    if capturable:
+        # multi-triangle assignment: for each triangle (nearest first), fill corners
+        capturable.sort(key=lambda cs: sum(min(dst(u, c) for u in cells) for c in cs))
+        for cs in capturable[:6]:
+            for c in cs:
+                # nearest free cell
+                cand = [u for u in cells if u not in used_cells or True]
+                cand = [u for u in cells if dst(u, c) < 999]
+                if not cand:
+                    continue
+                cand.sort(key=lambda u: dst(u, c))
+                u = cand[0]
+                if u != c:
+                    cmds.append(f"MOVE {u} {c} 1")
+                used_cells.append(u)
+                cells = [x for x in cells if x != u or cells.count(x) > cells.count(u)]
+                break
+    # leftovers: random walk
+    moved = set()
+    final_cells = []
+    for u in cells:
+        final_cells.append(u)
+    for u in set(cells):
+        cnt = cells.count(u)
+        neigh = list(board.adj.get(u, ()))
+        if neigh and cnt > 0:
+            for _ in range(cnt):
+                cmds.append(f"MOVE {u} {neigh[rng.randrange(len(neigh))]} 1")
+    return ";".join(cmds)

@@ -6,6 +6,7 @@ Logic aligned with github.com/eulerscheZahl/TryAngle-Catch.
 from __future__ import annotations
 
 import subprocess
+import os
 import sys
 from collections import deque
 from dataclasses import dataclass, field
@@ -89,6 +90,7 @@ class Board:
     triangles: List[Triangle]
     scores: List[int] = field(default_factory=lambda: [0, 0])
     turn: int = 0
+    _surrounded: bool = False
 
     @staticmethod
     def from_game_options(text: str) -> "Board":
@@ -159,7 +161,7 @@ class Board:
             return False
         amount = min(amount, self.remaining[src][pid])
         # one step toward dst
-        for nxt in self.adj.get(src, ()):
+        for nxt in sorted(self.adj.get(src, ())):
             if dist.get(nxt, 10**9) < dist[src]:
                 self.units[src][pid] -= amount
                 self.remaining[src][pid] -= amount
@@ -177,21 +179,27 @@ class Board:
         tri.use_spawn(pid, spawn, self.units, self.remaining)
         return True
 
-    def apply_attack(self, pid: int, a: int, b: int, c: int, target: int) -> bool:
-        tri = next(
+    def _find_tri(self, a: int, b: int, c: int) -> Optional[Triangle]:
+        return next(
             (t for t in self.triangles if t.has_node(a) and t.has_node(b) and t.has_node(c)),
             None,
         )
+
+    def attack_valid(self, pid: int, a: int, b: int, c: int, target: int) -> bool:
+        tri = self._find_tri(a, b, c)
         if tri is None or tri.owner != pid:
             return False
         if not tri.can_use(pid, self.remaining, 1):
             return False
-        corners = set(tri.corners())
-        if not any(target in self.adj.get(n, ()) for n in corners):
+        return any(target in self.adj.get(n, ()) for n in tri.corners())
+
+    def apply_attack(self, pid: int, a: int, b: int, c: int, target: int, validated: bool = False) -> bool:
+        if not validated and not self.attack_valid(pid, a, b, c, target):
+            return False
+        tri = self._find_tri(a, b, c)
+        if tri.owner != pid:
             return False
         opp = 1 - pid
-        if self.units[target][opp] <= 0:
-            return False
         tri.use_triangle(pid, 1, self.units, self.remaining)
         self.units[target][opp] = 0
         self.remaining[target][opp] = 0
@@ -255,7 +263,12 @@ class Board:
     def _finalize_subturn(self) -> bool:
         for t in self.triangles:
             t.update_allowed_captures(self.units)
-        if self.surround() or self.capture_triangles():
+        # referee: surround kills run at most once per turn (killedSurrounded flag)
+        if not self._surrounded:
+            self._surrounded = True
+            if self.surround():
+                return True
+        if self.capture_triangles():
             return True
         for t in self.triangles:
             if t.owner is not None:
@@ -265,6 +278,7 @@ class Board:
 
     def end_turn(self) -> None:
         self.reset_remaining()
+        self._surrounded = False
         while self._finalize_subturn():
             pass
         self.turn += 1
@@ -275,10 +289,14 @@ class Board:
             t.initial_owner = t.owner
         atk0, move0, spawn0 = self._split_commands(cmd_p0)
         atk1, move1, spawn1 = self._split_commands(cmd_p1)
-        for a in atk0:
-            self.apply_attack(0, *a)
-        for a in atk1:
-            self.apply_attack(1, *a)
+        # referee: one ATTACK per player per frame, both validated before either applies
+        for i in range(max(len(atk0), len(atk1))):
+            pair = []
+            for pid, atks in ((0, atk0), (1, atk1)):
+                if i < len(atks) and self.attack_valid(pid, *atks[i]):
+                    pair.append((pid, atks[i]))
+            for pid, a in pair:
+                self.apply_attack(pid, *a, validated=True)
         for src, dst, amt in move0:
             self.apply_move(0, src, dst, amt)
         for src, dst, amt in move1:
@@ -292,7 +310,7 @@ class Board:
     def bot_input(self, pid: int = 0) -> str:
         lines = [f"{self.scores[pid]} {self.scores[1-pid]}"]
         for n in sorted(self.coords):
-            lines.append(f"{n} {self.units[n][0]} {self.units[n][1]}")
+            lines.append(f"{n} {self.units[n][pid]} {self.units[n][1-pid]}")
         edges = []
         seen = set()
         for a in sorted(self.adj):
@@ -304,9 +322,9 @@ class Board:
         lines.extend(edges)
         lines.append(str(len(self.triangles)))
         for t in self.triangles:
-            owner = -1 if t.owner is None else (0 if t.owner == 0 else 1)
-            me = 1 if t.can_capture[0] else 0
-            op = 1 if t.can_capture[1] else 0
+            owner = -1 if t.owner is None else (0 if t.owner == pid else 1)
+            me = 1 if t.can_capture[pid] else 0
+            op = 1 if t.can_capture[1 - pid] else 0
             a, b, c = t.corners()
             lines.append(f"{a} {b} {c} {owner} {me} {op}")
         lines.append("0")
@@ -339,15 +357,23 @@ def discover_triangles(coords: Dict[int, Coord], adj: Dict[int, Set[int]]) -> Li
 
 
 class BotSession:
-    """One long-lived bot process (same as CodinGame — TARGET etc. persist)."""
+    """One long-lived bot process (same as CodinGame — TARGET etc. persist).
+
+    PYTHONHASHSEED=0 makes the bot deterministic across processes: without it,
+    set-iteration order differs per process and identical bots play different
+    games — which poisoned every small-sample A/B comparison.
+    """
 
     def __init__(self, bot_path: Path):
+        env = dict(os.environ)
+        env.setdefault("PYTHONHASHSEED", "0")
         self.proc = subprocess.Popen(
             [sys.executable, str(bot_path)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=env,
         )
         assert self.proc.stdin and self.proc.stdout
         init = ""

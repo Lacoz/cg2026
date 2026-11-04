@@ -9,7 +9,10 @@ předlžovania kontextu — čo funguje, čo nie a prečo.
 
 | Súbor | Čo je |
 |---|---|
-| `bot.py` | **Aktuálny bot = „staggered engines" verzia** (obnovená z transkriptu, validovaná). Toto submituj. |
+| `bot.py` | **Aktuálny bot = kópia `bot2.py`** (token local search, viď sekciu nižšie). Toto submituj. |
+| `bot2.py` | Vývojová verzia nového bota (rovnaký obsah ako `bot.py`). |
+| `bot_old.py` | Starý „staggered engines" bot (rekonštrukcia: verzia z 12:22 s vypnutou MA cache). |
+| `bot_submitted.py` | Kód posledného submitu na CG (2026-11-04 10:22 UTC). |
 | `bot_missions_backup.py` | Experiment „missions" (perzistentné ciele + mass-spawn). Lokálne OK, **online 0 % win rate** — príčina nezistená. NEsubmitovať. |
 | `bot_recovered.py` | Medzistav recovery (pred replayom patchov), môžeš zmazať. |
 | `statement.md` | Pravidlá Wood 1 (sedia s webom). |
@@ -21,6 +24,51 @@ předlžovania kontextu — čo funguje, čo nie a prečo.
 online `./cg test --games 2` → **2/2 WIN**, všetky brány prešli ·
 opravy: spawn-corner uniqueness, `en_route` accounting, `trap_risk`, pass-through parking block,
 FOCUS + LAST_FOCUS, fázový rozvrh, swarm doktrína, spawn tempo `owned//3`.
+
+## Nový bot `bot2.py` (2026-11-04 popoludní) — porazil AdrienGI
+
+Online vs AdrienGI (agent 6841548, seed 8557136380578188000): **3× WIN** 88:−1, 88:−1, 81:−1 (games
+916529871, 916530660, 916531096 — posledná už so „žiadne 2 SPAWN na jeden dom“); predtým −1:79, −1:81, −1:92. `./cg test --games 3` vs default: 3/3 WIN, median 71.
+Lokálne bije starý bot ~117/120.
+
+Ako funguje (jeden ťah, ~10–30 ms):
+1. **ATTACK** z vlastných trojuholníkov len na stack ≥ `ATK_MIN+1` (útok stojí 3 jednotky + trojuholník).
+2. **SPAWN** na všetkých vlastných nepoužitých (od ťahu 40 cap podľa armády súpera).
+3. **Assignment** — jednotky na rohy capturable / čakajúcich (spawn-reset) trojuholníkov, `op+1` na roh.
+4. **Token local search** — každá jednotka je token, inkrementálne hodnotenie (house_term + tri_term),
+   single moves, composite capture, composite vacate (aj celé skupiny čakajúcich trojuholníkov naraz).
+
+Kľúčová zmena, ktorá rozhodla: **`P_CONT=0.7`, `OADJ_MAX=1`** — hodnota capture sa násobí 0.7 za každý
+roh, kde má súper susednú jednotku a my nemáme náskok ≥ 2. Bot bez toho plánoval captures proti
+statickému súperovi; AdrienGI ich od T19 blokoval všetky (5 plánovaných → 0), naše stacky na
+spornom území zomierali. Lokálne 126/192 vs predchádzajúca verzia.
+
+### Model súpera („opponent IQ guess“) + riziko útokov
+
+Input neobsahuje akcie súpera, bot ich odvodzuje z rozdielu stavov medzi ťahmi (`learn()` v `bot2.py`):
+- **Detekcia útoku**: súperov trojuholník (vlastnil ho, mal jednotky na rohoch) zneutrálnel a naše
+  jednotky na susednom dome zmizli viac, než vysvetľujú naše vlastné príkazy → útok, veľkosť = stack.
+  Overené lokálne: 17/17 útokov detegovaných presne.
+- **P(útok | najväčší náš stack v dosahu k)**: Beta-posterior per k, prior z ~80 logovaných hier
+  (k=2: 0.15, 3: 0.32, 4: 0.40, 5+: 0.56), monotónne. AdrienGI sa naučil na ~0.49 pre k≥3.
+- **keep rate**: aký podiel vlastných trojuholníkov súper drží (nespawnuje). AdrienGI ~0.08, default/boss ~0.95.
+- **capture aktivita**: skutočné / predikované captures súpera (tabuľka P(capture | rohy držané, rohy
+  vyhrateľné) z logov). AdrienGI ~1.3–1.5×.
+- **Mapa rizika**: P(dom je napadnuteľný budúci ťah) z trojuholníkov, ktoré súper bude vlastniť
+  (držané × keep, dobyteľné × capture × `RISK_CAPW`). Penalta = `RISK`·WU·(c − `RISK_NET`)·P(útok|c)·riziko.
+  `RISK_NET=3`: útok stojí súpera 3 jednotky + trojuholník, takže 2–3 stack obetovať je fér výmena —
+  penalizujeme len čistú stratu (inak bot zamrzne, lokálne 16/198).
+- MSG ukazuje profil: `a0.09/0.49/0.49` = P(útok) pre stack 2/3/4, `k` keep rate, `c` capture aktivita, `x` počet útokov.
+
+Výsledok: nahradilo statickú `EXP` penaltu; lokálne 164/278 vs bez modelu, vs AdrienGI **WIN 95:−1**
+(game 916536436), `./cg test --games 2` 2/2 WIN (79:−1, 63:−1).
+
+Čo NEpomohlo (netreba skúšať znova): `DANGER_CAP>0`, `EXP2>0` (defenzíva = capture stall, lokálne 2/80),
+`CONTEST_D`, ladenie `EXP/V_CAP/V_LOSE/THREAT/SPR/WU` (všetko šum).
+
+Nástroje: `scripts/arena.py A.py B.py --maps N --swap` (lokálny turnaj), `scripts/variant.py out.py '{"K":v}'`
+(variant parametrov), `scripts/replay_log.py <game_id> --losses --cmds` (resimulácia online logu +
+straty ATK/SUR), `scripts/trace.py`, `scripts/losses.py`.
 
 ## Benchmark (2026-11-04, 11:30)
 
@@ -164,10 +212,15 @@ sa prehráva: ich 39 kills vs našich ~15 spawnov.
 
 **Punish mechanizmus (IMPLEMENTOVANÉ 2026-11-04)**: `LAST_OWNER` tracking + `punish_tris`
 (4B1, priorita pred FOCUS) — capture tri, ktoré súper práve neutralizoval útokom/spawnom.
-Výsledok vs AdrienGI: capture ich tri 1–3/ťah (funguje), ALE ich swarm rebuild je rýchlejší
-a náš v=18 padol na 9 (f56: 9-unit loss combo) — attrition war sa stále prehráva.
-Ďalší level: ich útoky tiež ničia naše ENGINE rohy → po ich útoku musí refill okamžite
-obnoviť engine (unlimited reach aj pri veľkom počte engineov).
+Výsledok vs AdrienGI: capture ich tri 1–3/ťah (funguje), ALE ich swarm rebuild je rýchlejší.
+
+**FINÁLNA DIAGNÓZA prehier vs AdrienGI (8 hier, seed 8557136380578188000)**: hra sa rozhodne
+do T20 — naša armáda je vyhladená (12→1 jednotka) ich útokmi na naše capture stacky; endgame
+(t=0, 4 jednotky, 31 capturable tri) je už nezvratný — 80 ťahov bez jediného captureu. Koreň:
+**tempo-flywheel** (ich capture 4–7/ťah → owned 10–20 → spawn 5–8/ťah → armáda 25+; náš:
+1–3/1–5/1–2). Raid-the-rear rebuild testovaný a REVERTOVANÝ (default 100 %→50 %, vs AdrienGI
+bez efektu). Engine-hunting ATTACK (náš najväčší zbrojný lever) fireuje len 1–2×/hra kvôli
+simultánnemu útoku guardu — bez neho attrition favoiruje väčšiu armádu vždy.
 
 Hrať proti konkrétnemu hráčovi: `./cg replay --seed <S> --opponent <agent_id> --ide`
 (legy: `GET /challenges/fall-challenge-2026/opponents` — nick → `agent_id`).
