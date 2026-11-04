@@ -67,8 +67,23 @@ Input neobsahuje akcie súpera, bot ich odvodzuje z rozdielu stavov medzi ťahmi
   | `k` | keep rate: podiel súperových trojuholníkov, ktoré si udrží do ďalšieho ťahu (nespawnuje z nich) |
   | `c` | capture aktivita: skutočné / predikované captures súpera (1 = podľa tabuľky, >1 agresívnejší) |
   | `x` | počet doteraz detegovaných útokov súpera |
-  | `ms` | čas nášho ťahu v ms (limit 50, rozpočet `BUDGET` 22) |
-  | `p` | počet prechodov token local search v tomto ťahu (max 8) |
+  | `ms` | čas nášho ťahu v ms (limit 50, rozpočet `BUDGET` 30; kopance míňajú celý rozpočet, takže ~30 je normál) |
+  | `p` | počet prechodov úvodného token local search v tomto ťahu (max 8) |
+
+### Výkon: SciPy priradenie + rýchle hodnotenie + kopance (2026-11-04 popoludní)
+
+- **CG prostredie** (overené): Python 3.11.5, NumPy 1.23.2, SciPy 1.9.3. Import numpy+scipy.optimize ~220 ms (prvý ťah má 1000 ms).
+  CG CPU ≈ lokálny Python 3.9 na Macu, lokálne časy sú reprezentatívne. Lokálne so SciPy: `/tmp/cgvenv/bin/python scripts/arena.py …`.
+- **Priradenie jednotiek → rohy**: greedy vyberie rohy, `scipy.optimize.linear_sum_assignment` vyberie jednotky (min. súčet vzdialeností).
+  Bez SciPy padá späť na greedy. Lokálne 169/284 vs bez neho.
+- **Rýchle hodnotenie ťahu**: priebežné počty susedov, kde vedieme my / súper (`nmine`/`nopp`), prepočet len domov s reálnou zmenou
+  a trojuholníkov s takým rohom. Prvý krok (bez zmeny rozhodnutí, overené ťah po ťahu) 1,45×, prepočet len zmien ďalej
+  zvýšil počet kopancov za ťah ~1,5–2×. Samotná rýchlosť bez kopancov nepomáha (144/284), lebo search skonverguje.
+- **Kopance (ILS)**: zvyšok rozpočtu: 1–`KICK` náhodných presunov → lokálne dohľadanie v okolí (vzdialenosť ≤ 2) → ponechať len pri
+  lepšom celkovom skóre, inak vrátiť stav. 205/284 vs bez kopancov, lokálne dohľadanie ďalších 161/284. `KICK=1` horší, `KICK=3` neutrálny.
+- **GC vypnuté** (`gc.disable()`): bot netvorí cyklický odpad (0 nedosiahnuteľných objektov/ťah), zber uprostred ťahu robil špičky +2 ms.
+- **`BUDGET` 22 → 30 ms**: s kopancami čas pomáha (157/284). Online 4 hry bez timeoutu, max 30 ms.
+- Spolu vs verzia pred týmito zmenami: **243/284** lokálne.
 
 Výsledok: nahradilo statickú `EXP` penaltu; lokálne 164/278 vs bez modelu, vs AdrienGI **WIN 95:−1**
 (game 916536436), `./cg test --games 2` 2/2 WIN (79:−1, 63:−1).

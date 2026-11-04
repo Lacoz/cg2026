@@ -1,3 +1,4 @@
+import gc
 import random
 import sys
 import time
@@ -46,7 +47,7 @@ P = {
     "CAP_MUL": 1.25,
     "CAP_ADD": 8,
     "CAP_MAX": 80,
-    "BUDGET": 0.022,
+    "BUDGET": 0.030,
     "ILS": 1,  # spend leftover budget on random kicks + re-descent
     "KICK": 2,  # max tokens moved by one kick
 }
@@ -65,9 +66,6 @@ dist = None
 order_from = None
 tri_c = None
 tri_nb = None
-aff_h = None
-aff_t = None
-pair_cache = {}
 turn = 0
 
 # ---------------- opponent model (learned from state diffs, actions are not in the input) ----------------
@@ -154,6 +152,8 @@ def atk_prob():
         p[k] = max(p[k - 1], (atk_a[k] + ATK_PRIOR[k] * P["ATK_S"]) / (atk_n[k] + P["ATK_S"]))
     return p
 
+# the turn loop creates no reference cycles; a collection would only cost time mid-turn
+gc.disable()
 while True:
     line = input()
     t_start = time.perf_counter()
@@ -201,13 +201,7 @@ while True:
             for c in cs:
                 s.update(nb[c])
             tri_nb.append(sorted(s))
-        aff_h = [sorted({x} | set(nb[x])) for x in range(N)]
-        aff_t = []
-        for x in range(N):
-            s = set()
-            for y in aff_h[x]:
-                s.update(tris_of[y])
-            aff_t.append(sorted(s))
+        near2 = [[h for h in range(N) if dist[x][h] <= 2] for x in range(N)]
         # home side of each triangle: whose start is closer to all of its corners
         st_me = [h for h in range(N) if my[h] > 0]
         st_op = [h for h in range(N) if op[h] > 0]
@@ -484,26 +478,28 @@ while True:
             for x in nb[h]:
                 arr[x] += 1
 
+    dirty = []  # houses whose nmine / nopp changed
+
     def bump(h, dv):
         d0 = cnt[h] - op[h]
         cnt[h] += dv
         d1 = d0 + dv
+        if (d0 > 0) == (d1 > 0) and (d0 < 0) == (d1 < 0):
+            return
+        ns = nb[h]
+        dirty.extend(ns)
         if d0 > 0:
-            if d1 <= 0:
-                for x in nb[h]:
-                    nmine[x] -= 1
+            for x in ns:
+                nmine[x] -= 1
         elif d0 < 0:
-            if d1 >= 0:
-                for x in nb[h]:
-                    nopp[x] -= 1
+            for x in ns:
+                nopp[x] -= 1
         if d1 > 0:
-            if d0 <= 0:
-                for x in nb[h]:
-                    nmine[x] += 1
+            for x in ns:
+                nmine[x] += 1
         elif d1 < 0:
-            if d0 >= 0:
-                for x in nb[h]:
-                    nopp[x] += 1
+            for x in ns:
+                nopp[x] += 1
 
     def house_eval(x):
         """(owner of house x, value of its units) for the current cnt."""
@@ -569,65 +565,59 @@ while True:
         own[x], hv[x] = house_eval(x)
     tv = [tri_term(i, own) for i in range(T)]
 
-    def affected(houses):
-        if len(houses) == 2:
-            p, qq = houses
-            key = p * N + qq
-            r = pair_cache.get(key)
-            if r is None:
-                r = (sorted(set(aff_h[p]) | set(aff_h[qq])), sorted(set(aff_t[p]) | set(aff_t[qq])))
-                pair_cache[key] = r
-            return r
-        H = set()
-        TS = set()
-        for x in houses:
-            H.update(aff_h[x])
-            TS.update(aff_t[x])
-        return H, TS
-
     def eval_moves(mv):
-        """mv: list of (token, new_pos). Returns (delta, state) without committing."""
+        """mv: list of (token, new_pos). Returns (delta, state) without committing.
+        Only houses whose own count or neighbour balance changed, and triangles with
+        such a corner, are re-evaluated."""
         hs = []
-        dtok = 0.0
+        d = 0.0
         for k, qq in mv:
             p = tok_pos[k]
             hs.append(p)
             hs.append(qq)
-            dtok += tok_val(k, qq) - tok_val(k, p)
-        H, TS = affected(hs)
-        before = 0.0
-        for x in H:
-            before += hv[x]
-        for i in TS:
-            before += tv[i]
+            d += tok_val(k, qq) - tok_val(k, p)
+        dirty.clear()
         for k, qq in mv:
             bump(tok_pos[k], -1)
             bump(qq, 1)
-        own0 = [own[x] for x in H]
-        after = 0.0
+        H = set(hs)
+        H.update(dirty)
+        if use_surr:
+            for x in hs:
+                H.update(nb[x])
         no = []
         nh = []
+        flip = []
         for x in H:
             o_, v = house_eval(x)
-            own[x] = o_
             no.append(o_)
             nh.append(v)
-            after += v
+            d += v - hv[x]
+            if o_ != own[x]:
+                flip.append((x, own[x]))
+                own[x] = o_
+        TS = set()
+        for x in hs:
+            TS.update(tris_of[x])
+        for x, _ in flip:
+            TS.update(tris_of[x])
         nt = []
         for i in TS:
             v = tri_term(i, own)
             nt.append(v)
-            after += v
-        for x, o_ in zip(H, own0):
+            d += v - tv[i]
+        for x, o_ in flip:
             own[x] = o_
         for k, qq in mv:
             bump(tok_pos[k], 1)
             bump(qq, -1)
-        return after - before + dtok, (H, TS, no, nh, nt)
+        return d, (H, TS, no, nh, nt)
 
     def commit(mv, state):
         H, TS, no, nh, nt = state
         for k, qq in mv:
+            moved.append(tok_pos[k])
+            moved.append(qq)
             bump(tok_pos[k], -1)
             bump(qq, 1)
             tok_pos[k] = qq
@@ -639,6 +629,7 @@ while True:
 
     budget = P["BUDGET"]
     ntok = len(tok_pos)
+    moved = []  # houses touched by commits
 
     # initial greedy: every assigned unit takes its first step if it does not hurt
     for k in range(ntok):
@@ -653,10 +644,10 @@ while True:
         if d > -2.0:
             commit([(k, step)], st)
 
-    def single_pass():
+    def single_pass(toks=None):
         improved = False
         seen = set()
-        for k in range(ntok):
+        for k in range(ntok) if toks is None else toks:
             if time.perf_counter() - t_start > budget:
                 return improved
             p = tok_pos[k]
@@ -680,7 +671,8 @@ while True:
                 seen.add(key)
         return improved
 
-    def composite_pass():
+    def composite_pass(R=None):
+        """R: only triangles / vacate sets touching these houses."""
         improved = False
         for i in range(T):
             if time.perf_counter() - t_start > budget:
@@ -688,6 +680,8 @@ while True:
             if used[i] or owner[i] == 0 or not mecap[i]:
                 continue
             cs = tri_c[i]
+            if R is not None and cs[0] not in R and cs[1] not in R and cs[2] not in R:
+                continue
             missing = [c for c in cs if own[c] != 0]
             if not missing:
                 continue
@@ -721,6 +715,8 @@ while True:
         for cs in vacate_sets:
             if time.perf_counter() - t_start > budget:
                 return improved
+            if R is not None and cs.isdisjoint(R):
+                continue
             if sum(cnt[c] for c in cs) == 0:
                 continue
             mv = []
@@ -790,15 +786,21 @@ while True:
         while time.perf_counter() - t_start < budget:
             kicks += 1
             snap = (tok_pos[:], cnt[:], own[:], hv[:], tv[:], nmine[:], nopp[:])
+            moved.clear()
             for _ in range(rng.randint(1, P["KICK"])):
                 k = rng.randrange(ntok)
                 opts = [x for x in tok_opts[k] if x != tok_pos[k]]
                 if opts:
                     mv = [(k, rng.choice(opts))]
                     commit(mv, eval_moves(mv)[1])
+            # re-descend only around what moved
+            R = set()
             for _ in range(8):
-                a = single_pass()
-                b = composite_pass()
+                for h in moved:
+                    R.update(near2[h])
+                moved.clear()
+                a = single_pass([k for k in range(ntok) if tok_pos[k] in R])
+                b = composite_pass(R)
                 if not a and not b:
                     break
             v = total()
