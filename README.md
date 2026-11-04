@@ -60,11 +60,28 @@ Fázy v ťahu, v tomto poradí:
 
 | Súper | Správanie | Ako proti nemu |
 |---|---|---|
-| `default` (Wood) | = level-2 boss: 3 jednotky na najbližší tri, 1 spawn/ťah, zvyšok random walk; ATTACK až pri > 10 jednotkách | Aktuálny bot ho bije 100 % (win rate, 10+ hier) |
+| `default` (Wood) | = level-2 boss: 3 jednotky na najbližší tri, 1 spawn/ťah, zvyšok random walk; ATTACK až pri > 10 jednotkách | Aktuálny bot ho bije 100 % (win rate, 15+ hier) |
 | **czuk** (rank 53, `agent_id=6845057`) | Rovnaký snowball ako Arnaud: 2–8 spawnov/ťah, OUR pile-ups trestal ATTACKom (6 mŕtvych na f52) a surroundom. Po opravách (2026-11-04): ATTACK katastrofa zmizla, surround ≤ 4, ale spawn tempo 1/ťah vs ich 2–8/ťah rozhodne koncovku. LOSS −1:73 (game 916451418). | Rovnaké ako Arnaud: rýchlejší rast počtu tri |
+| **[CG]loick** (rank 30, `agent_id=6841719`) | Najrýchlejší známy swarm: **13–31 MOVEov/ťah** (hýbe VŠETKÝMI jednotkami), 4–7 capture/ťah v strede hry, 5–8 spawnov/ťah. Skoro žiadna garda — jednotky neustále captureujú. Naše porovnanie: mv 2–8, sp 1–2. LOSS −1:59 (game 916454805, seed 6661582836916759000). | Doktrína „swarm nad garrisson“ — naše jednotky musia neustále captureovať, nie sedieť na rohoch |
 | **Arnaud.Net** (rank 22, `agent_id=6844116`) | **Mass-spawn 5–16/ťah**, recapture cyklus, ATTACK na naše stacky. Do T20 má 2–3× našu armádu. | Ešte neporazený. Treba: rýchlejší rast počtu tri (viac engine) + rozptýlenie jednotiek (anti-ATTACK) + možno 1:1 kópia ich stratégie |
 | **M_C** (rank ~50, `agent_id=6843883`) | Podobný snowball, menej presný | Remíza do stredu hry, prehráva koncovku |
 | `ctuanle` (rank 483, `agent_id=6843670`) | Slabý — bieme ho (4806:26) | — |
+
+### Naučené zo súperov (2026-11-04, [CG]loick analýza)
+
+1. **Garrisson je drahý**: stará doktrína rezervovala `opp+1` jednotiek na KAŽDOM rohu KAŽDého
+   own tri — pri 8 tri to parkovalo ~24 jednotiek, kým loick hýbal 20+. Oprava: kotvy len na
+   `hold_group` (spawn engine) max 1/roh. Skóre prichádza z OWNERSHIPU, nie z garnizonov —
+   trojuholník ostáva náš, kým niekto neprevrátí roh.
+2. **Spawn tempo škálovať s owned countom**: `n_spawn = owned // 3` (3-ťahový cyklus spawn→vacate→
+   recapture). Testované aj `//2` — na loick/czuk mapách HORŠIE (67→56, 78→71), lebo neutralizácia
+   predbehne capture tempo. `//3` je sweet spot.
+3. **FOCUS (sticky cieľ)**: greedy prehodnocuje cieľ každý ťah → jednotky wanderujú. FOCUS sa
+   vyberie raz (cluster + najbližší), obsluhuje sa PRED ostatnými capturemi, drží sa kým ho
+   nezískame (alebo 14 ťahov). `LAST_FOCUS` chráni cluster kotvu pred spawnom.
+4. **Pass-through parking**: jednotka na vzdialený cieľ sa 1. krokom BFS zastaví na medzidome —
+   ak je to roh v dosahu súperovho ATTACKu, nevedomo naskladnáme 4–9 jednotiek = jeden ATTACK
+   ich zmaže (czuk f52: 6 mŕtvych). Blokované cez `parked` sledovanie,ale stále nedokonalé.
 
 Hrať proti konkrétnemu hráčovi: `./cg replay --seed <S> --opponent <agent_id> --ide`
 (legy: `GET /challenges/fall-challenge-2026/opponents` — nick → `agent_id`).
@@ -79,11 +96,13 @@ Hrať proti konkrétnemu hráčovi: `./cg replay --seed <S> --opponent <agent_id
    **pass-through parking** (jednotka poslaná na vzdialený cieľ sa 1. krokom zastaví na medzidome —
    ak je to roh tri v dosahu súperovho ATTACKu, nevedomo tam naskladnáme 4–9 jednotiek a jeden
    súperov ATTACK ich zmaže). Opravené čiastočne: spawn corner uniqueness (per ťah), `en_route`
-   accounting, pass-through block (parked ≥ 3), `trap_risk` deprioritizácia, emptier-corner spawn
-   preference. Stále nepostačuje — potrebné **path-aware end-position planning** (plánovať, kde
+   accounting, pass-through block (parked ≥ 3 len pre pass-through, nie pre capture príchod),
+   `trap_risk` deprioritizácia, emptier-corner spawn preference, kotvy max 1/roh len na hold_group.
+   Stále nepostačuje — potrebné **path-aware end-position planning** (plánovať, kde
    jednotky really skončia: `first_step(src,dst)` pre každý move a počítať to do `parked`).
-3. **Rebuild po t=0**: keď prídeme o všetky tri, spawn sa obnoví len cez rebuild mode —
-   pomalé. Zvážiť prioritnú „regroup“ fázu.
+3. **Capture tempo vs swarm súperov**: loick robí 4–7 capture/ťah v strede hry, my 1–2. Treba
+   **paralelné multi-capture plánovanie** so zdieľanými rohmi (missions experiment mal správnu
+   myšlienku, ale online zamrzal — bug nezistený, `bot_missions_backup.py`).
 4. **Lokálny sim vs realita**: sim má jednu vlnu ATTACK (realita = multi-frame), nepoužívaj ho ako
    jediný signál — pred submitom vždy 2–3 online hry vs `default`.
 5. **BOT_SPEC.md** je čiastočne zastaraný (písal sa pre staršie verzie bota).

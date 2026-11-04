@@ -28,6 +28,13 @@ start_my = None
 start_opp = None
 home_side = set()
 
+# Persistent focus: the triangle we are committed to capturing. Without it the
+# greedy re-evaluates every turn, units wander through hubs (pass-through parking)
+# and we lose the early-game race to opponents that commit immediately.
+FOCUS = None
+FOCUS_AGE = 0
+LAST_FOCUS = None  # recently captured focus — keep its cluster intact for chaining
+
 while True:
     my_score, opp_score = [int(i) for i in input().split()]
     my, opp = {}, {}
@@ -127,25 +134,30 @@ while True:
     hold_group = []
     if army < max_army:
         spawnable = [t for t in usable if t[:3] not in used_tris]
-        # High-hub triangles anchor the most adjacent triangles — keep those scoring.
-        spawnable.sort(key=lambda t: (-tri_hub[t[:3]][0], -tri_hub[t[:3]][1]))
-        if len(spawnable) >= 4:
-            half = (len(spawnable) + 1) // 2
-            hold_group = [t[:3] for t in spawnable[:half]]
-            spawn_candidates = spawnable[half:]
-        elif len(spawnable) >= 2:
-            # Small base: still keep the best triangle scoring + spawn-ready, spawn on the rest
-            hold_group = [spawnable[0][:3]]
-            spawn_candidates = spawnable[1:]
-        else:
-            # Early game: grow as fast as possible
-            spawn_candidates = spawnable
+        # Spawn WHERE it hurts least: never on the fresh capture that anchors the
+        # cluster chain. Rank spawnable by (shared corners with FOCUS asc, hub desc)
+        # so high-connectivity triangles stay owned and keep chaining captures.
+        focus_set = set(FOCUS if FOCUS else LAST_FOCUS or ())
+
+        def spawn_rank(t):
+            shared = len(set(t[:3]) & focus_set)
+            return (shared, -tri_hub[t[:3]][0], -tri_hub[t[:3]][1])
+
+        spawnable.sort(key=spawn_rank)
+        # Spawn rate must match the 3-turn spawn cycle: each owned triangle can
+        # spawn once per 3 turns (spawn -> vacate -> recapture). Spawning on more
+        # just neutralizes our scoring base; spawning on less wastes growth.
+        # Scale: spawn on ~owned/3 triangles per turn, at least 1 while growing.
+        n_spawn = max(1, min(len(spawnable) - 1 if len(spawnable) > 1 else 1, max(1, len(owned) // 3)))
+        if len(spawnable) <= 1:
+            n_spawn = len(spawnable)
+        hold_group = [t[:3] for t in spawnable[: len(spawnable) - n_spawn]]
+        spawn_candidates = spawnable[len(spawnable) - n_spawn :]
         for t in spawn_candidates:
             if army + len(to_spawn) >= max_army:
                 break
-            if army + len(to_spawn) < 26 or len(spawn_candidates) - len(to_spawn) > 0 or army <= opp_army + 6:
-                to_spawn.append(t[:3])
-                used_tris.add(t[:3])
+            to_spawn.append(t[:3])
+            used_tris.add(t[:3])
 
     # 3. Jointly optimize SPAWN corner choices + 1-turn (`d <= 1`) unit movements!
     avail = dict(my)
@@ -153,14 +165,19 @@ while True:
     spawn_houses = {h: 0 for h in houses}
     cands = [t for t in tris if t[3] != 0 and t[4]]
 
-    # Keep anchors on triangles that remain owned (not used for SPAWN/ATTACK)
+    # Keep anchors ONLY on spawn-engine triangles (hold_group), max 1 per corner.
+    # The old doctrine reserved opp+1 units on EVERY corner of EVERY owned triangle —
+    # with 8 triangles that parks up to 24 units doing nothing while the opponent
+    # swarms 20+ moves per turn ([CG]loick comparison). Score comes from OWNERSHIP,
+    # not garrison: a triangle stays ours until someone flips a corner, and the
+    # army is better spent capturing the next triangle.
     if army >= 12:
         for t in owned:
-            if t[:3] in used_tris:
+            if t[:3] in used_tris or t[:3] not in hold_group:
                 continue
             if all(avail.get(c, 0) + locked_end.get(c, 0) > opp.get(c, 0) for c in t[:3]):
                 for c in t[:3]:
-                    need_hold = max(0, (opp.get(c, 0) + 1) - locked_end.get(c, 0))
+                    need_hold = max(0, 1 - locked_end.get(c, 0))
                     take = min(avail.get(c, 0), need_hold)
                     avail[c] -= take
                     locked_end[c] += take
@@ -176,6 +193,17 @@ while True:
     for ot in opp_tris:
         for c in ot:
             attack_danger.update(adj.get(c, ()))
+
+    def risky(h):
+        """Parking danger: dead-ends and houses fully surrounded by the opponent
+        get swept (surround kill) or ATTACKed."""
+        neighs = list(adj.get(h, ()))
+        if not neighs:
+            return 2
+        opp_nb = sum(1 for m in neighs if opp.get(m, 0) > 0)
+        if opp_nb == len(neighs):
+            return 2
+        return 1 if opp_nb > 0 else 0
 
     opp_reach1 = {
         h: opp.get(h, 0) + sum(opp.get(n, 0) for n in adj.get(h, ()) if n not in home_side or opp.get(n, 0) > 0)
@@ -218,6 +246,46 @@ while True:
     }
 
     # 4. Greedy assignment to capture triangles (me_cap=True, owner!=0) with available units (`avail`).
+    # FOCUS: sticky commitment — pick the target ONCE and keep it until captured
+    # (or hopeless). Prevents turn-by-turn re-targeting that makes units wander.
+    # NOTE: module-level scope — no `global` needed (and it would be a SyntaxError).
+    focus_cs = None
+    if FOCUS is not None:
+        ft = next((t for t in tris if t[:3] == FOCUS), None)
+        if ft is None:
+            FOCUS = None
+        elif ft[3] == 0:
+            LAST_FOCUS = FOCUS  # captured — keep its cluster intact when choosing spawn targets
+            FOCUS = None  # mission complete
+        elif not ft[4] and ft[3] != 0:
+            FOCUS_AGE += 1  # me_cap False: waiting for reset/vacate — keep waiting
+        else:
+            FOCUS_AGE += 1
+        if FOCUS_AGE > 14:
+            FOCUS = None  # hopeless — re-target
+    if FOCUS is None:
+        unit_houses = [h for h, cnt in my.items() if cnt > 0]
+        owned_cs = [set(t[:3]) for t in owned]
+        pool = [t for t in cands if t[4]]
+        if pool:
+            def focus_rank(t):
+                dmax = max(
+                    min(dist(u, c) for u in unit_houses) for c in t[:3]
+                )
+                # Cluster growth: prefer triangles sharing a corner with one we own —
+                # the capture force can re-task between them and spawns chain.
+                cluster = 0 if any(set(t[:3]) & ocs for ocs in owned_cs) else 1
+                return (
+                    cluster,
+                    dmax,
+                    -tri_hub[t[:3]][0],
+                    0 if t[3] == 1 else 1,
+                )
+            pool.sort(key=focus_rank)
+            FOCUS = pool[0][:3]
+            FOCUS_AGE = 0
+    focus_cs = FOCUS
+
     # 4A. First find all triangles that can be captured THIS turn (`max_d <= 1`)!
     imm_cands = [
         t
@@ -404,9 +472,45 @@ while True:
                     locked_end[step] = locked_end.get(step, 0) + 1
                     if u != c:
                         cmds.append(f"MOVE {u} {c} 1")
+                    if dist(u, c) > 1:
+                        en_route[c] = en_route.get(c, 0) + 1
+                    else:
+                        locked_end[c] = locked_end.get(c, 0) + 1
+
+    # 4B2. FOCUS commitment: serve the sticky target's deficits BEFORE other
+    # captures so units converge instead of wandering (loick/Arnaud commit
+    # instantly; our turn-by-turn re-targeting lost the early game).
+    if focus_cs is not None:
+        ft = next((t for t in tris if t[:3] == focus_cs), None)
+        if ft is not None and ft[4]:
+            for c in ft[:3]:
+                deficit = (opp.get(c, 0) + 1) - my.get(c, 0) - locked_end.get(c, 0) - en_route.get(c, 0)
+                while deficit > 0 and avail_total > 0:
+                    srcs = [
+                        u
+                        for u in houses
+                        if avail.get(u, 0) > 0
+                        and u != c
+                        and first_step(u, c) not in forbidden_end
+                    ]
+                    if not srcs:
+                        break
+                    srcs.sort(key=lambda u: (dist(u, c), risky(u), -avail[u]))
+                    u = srcs[0]
+                    take = min(avail[u], deficit)
+                    avail[u] -= take
+                    avail_total -= take
+                    deficit -= take
+                    en_route[c] = en_route.get(c, 0) + take
+                    step = first_step(u, c)
+                    locked_end[step] = locked_end.get(step, 0) + 1
+                    if u != c:
+                        cmds.append(f"MOVE {u} {c} {take}")
 
     # 4C. Greedy assignment for remaining triangles.
-    stay_home = opp_army > 0 and army < opp_army + 10
+    # Swarm doctrine: stay_home ONLY while strictly behind in units — ahead or
+    # even, we keep the whole army capturing instead of idling at home.
+    stay_home = opp_army > army
     max_allowed_d = 2 if (stay_home and best_imm is not None) else 999
 
     # REBUILD MODE: when we own NO triangles (scoring base wiped by opponent ATTACK),
