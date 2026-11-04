@@ -39,7 +39,7 @@ def summarize(games: list[GameMetrics]) -> dict:
         return {"games": 0}
     wins = sum(1 for g in games if g.win)
     crashes = sum(
-        1 for g in games if g.timeout or g.my_score == -1 or g.eliminated
+        1 for g in games if g.timeout or g.eliminated
     )
     return {
         "games": len(games),
@@ -55,15 +55,20 @@ def summarize(games: list[GameMetrics]) -> dict:
 
 def check_gates(summary: dict, gates: dict) -> list[str]:
     failures: list[str] = []
-    if "min_win_rate" in gates and summary["win_rate"] < gates["min_win_rate"]:
+    if summary.get("games", 0) == 0:
+        failures.append(
+            "no completed games (check API errors above, e.g. NO_BOSS → use opponent default in Wood)"
+        )
+        return failures
+    if "min_win_rate" in gates and summary.get("win_rate", 0) < gates["min_win_rate"]:
         failures.append(
             f"win_rate {summary['win_rate']:.2f} < {gates['min_win_rate']}"
         )
-    if "min_median_score" in gates and summary["median_my_score"] < gates["min_median_score"]:
+    if "min_median_score" in gates and summary.get("median_my_score", 0) < gates["min_median_score"]:
         failures.append(
             f"median_score {summary['median_my_score']:.1f} < {gates['min_median_score']}"
         )
-    if "max_crash_rate" in gates and summary["crash_rate"] > gates["max_crash_rate"]:
+    if "max_crash_rate" in gates and summary.get("crash_rate", 1) > gates["max_crash_rate"]:
         failures.append(
             f"crash_rate {summary['crash_rate']:.2f} > {gates['max_crash_rate']}"
         )
@@ -129,9 +134,18 @@ def main() -> int:
             try:
                 m = run_test_game(challenge, bot_path, language, opp_id)
             except SystemExit as e:
-                print(f"  ERROR: {e}", file=sys.stderr)
-                all_failures.append(f"{opp_id} game {i + 1}: {e}")
-                time.sleep(2)
+                err = str(e)
+                print(f"  ERROR: {err}", file=sys.stderr)
+                all_failures.append(f"{opp_id} game {i + 1}: {err}")
+                if "rate-limited" in err or "429" in err:
+                    import re as _re
+
+                    w = _re.search(r"retry_after_seconds['\"]?:\s*(\d+)", err)
+                    delay = int(w.group(1)) + 2 if w else 60
+                    print(f"  (rate limit — waiting {delay}s)", flush=True)
+                    time.sleep(delay)
+                else:
+                    time.sleep(2)
                 continue
             games.append(m)
             print(

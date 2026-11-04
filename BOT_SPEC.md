@@ -129,8 +129,8 @@ Lokálny workflow pred submisou na CodinGame:
 pip install -r requirements.txt   # PyYAML
 chmod +x cg
 
-./cg test                         # batch test games + scoring.yaml gates
-./cg test --opponent boss --games 10
+./cg test                         # batch test games + scoring.yaml gates (Wood: opponent `default`)
+./cg test --opponent default --games 10
 ./cg submit                       # submit len ak gates prejdú
 ./cg submit --force               # submit aj po fail (výnimočne)
 ./cg limits                       # zvyšok test-game kvót API
