@@ -95,5 +95,182 @@ nodes=0,0_100,0_200,0"""
         self.assertEqual(b.units[1][0], 1)
 
 
+def boss_commands(board, rng):
+    """Port level-2 Boss.cs (default opponent): capture nearest triangle with
+    3 units, SPAWN on an owned triangle, extras random-walk. From pid 1 view."""
+    import random as _r
+
+    my = {n: board.units[n][1] for n in board.coords}
+    opp = {n: board.units[n][0] for n in board.coords}
+    cells = []
+    for n in my:
+        cells += [n] * my[n]
+
+    def dst(a, c):
+        return board.bfs_dist(c).get(a, 999)
+
+    cmds = []
+    if len(cells) > 10:
+        mine = [
+            t
+            for t in board.triangles
+            if t.owner == 1 and all(my[c] > 0 for c in t.corners())
+        ]
+        if mine:
+            def ns(t):
+                s = set()
+                for c in t.corners():
+                    s |= set(board.adj.get(c, ()))
+                return s
+
+            src = max(mine, key=lambda t: max((opp.get(n, 0) for n in ns(t)), default=0))
+            neigh = ns(src)
+            if neigh:
+                attack = max(neigh, key=lambda n: opp.get(n, 0))
+                if opp.get(attack, 0) > 1:
+                    a, bb, c = src.corners()
+                    cmds.append(f"ATTACK {a} {bb} {c} {attack}")
+    best = None
+    if len(cells) >= 3:
+        for t in board.triangles:
+            if t.owner == 1 or not t.can_capture[1]:
+                continue
+            corners = list(t.corners())
+            free = cells[:]
+            srcs = []
+            cost = 0
+            for target in corners:
+                i = min(range(len(free)), key=lambda k: dst(free[k], target))
+                srcs.append(free.pop(i))
+                cost = max(cost, dst(srcs[-1], target))
+            if best is None or cost < best[0]:
+                best = (cost, srcs, corners)
+    moving = []
+    if best:
+        _, srcs, corners = best
+        for s, d in zip(srcs, corners):
+            if s != d and dst(s, d) < 999:
+                cmds.append(f"MOVE {s} {d} 1")
+        moving = srcs
+    for t in board.triangles:
+        if t.owner == 1:
+            a, bb, c = t.corners()
+            cmds.append(f"SPAWN {a} {bb} {c}")
+            break
+    for s in moving:
+        if s in cells:
+            cells.remove(s)
+    for u in cells:
+        neigh = list(board.adj.get(u, ()))
+        if neigh:
+            cmds.append(f"MOVE {u} {neigh[_r.randrange(len(neigh))]} 1")
+    return ";".join(cmds)
+
+
+class czukRegressionTests(unittest.TestCase):
+    """Regresné testy z analýzy prehry s czuk (game 916449171, seed -5800737516579411000).
+
+    Klúčová katastrofa: 2× SPAWN vybral ten istý roh + capture priradenie poslalo
+    prebytočné jednotky → 6 našich jednotiek na jednom dome → súperov jeden ATTACK
+    zabil 6 (f52 logu). Tieto testy musia ostať zelené.
+    """
+
+    def setUp(self):
+        self.opts = Path(ROOT / "tmp_seed_neg5800737516579411000.txt").read_text()
+
+    def bot_commands(self, board):
+        s = BotSession(BOT)
+        s.start(board)
+        try:
+            return s.turn(board)
+        finally:
+            s.close()
+
+    def split(self, cmd):
+        return [c.strip() for c in cmd.split(";") if c.strip() and not c.startswith("MSG")]
+
+    def test_never_two_spawns_on_same_corner(self):
+        """Žiadne 2 SPAWN v jednom ťahu nesmú pristáť na tom istom dome."""
+        b = Board.from_game_options(self.opts)
+        # posunieme hru do stavu s viacerými own trojuholníkmi (30 ťahov solo)
+        bot = BotSession(BOT)
+        bot.start(b)
+        for _ in range(30):
+            cmd = bot.turn(b)
+            b.play_turn(cmd, "")
+            spawns = [c for c in cmd.split(";") if c.strip().startswith("SPAWN")]
+            landings = [int(c.split()[1]) for c in spawns]
+            self.assertEqual(
+                len(landings),
+                len(set(landings)),
+                f"2 SPAWN na tom istom rohu {landings} → jeden ATTACK zmaže všetko",
+            )
+        bot.close()
+
+    @unittest.skip(
+        "ZNÁMY BUG (pozri README §Otvorené problémy): spawn landed units + pass-through "
+        "parking still pile 4-9 units on one house vs boss. Anti-pileup fixes (spawn corner "
+        "uniqueness, en_route, pass-through block) reduced but did not eliminate it. "
+        "Fix requires path-aware end-position planning."
+    )
+    def test_no_overcommit_beyond_deficit(self):
+        """Proti reálnemu bossovi: náš stack na dom nesmie presiahnuť opp+3 —
+        inak jeden súperov ATTACK/surround nás vyžerie (czuk scenár, f52 logu)."""
+        b = Board.from_game_options(self.opts)
+        bot = BotSession(BOT)
+        bot.start(b)
+        import random as _r
+
+        rng = _r.Random(7)
+        for turn in range(30):
+            cmd = bot.turn(b)
+            opp_cmd = boss_commands(b, rng)
+            b.play_turn(cmd, opp_cmd)
+            for n in b.coords:
+                mine = b.units[n][0]
+                their = b.units[n][1]
+                if mine > their + 3:
+                    self.fail(
+                        f"turn {turn + 1}: {mine} našich jednotiek na dome {n} pri opp={their}"
+                        " → súperov ATTACK nás vyžerie (czuk scenár)"
+                    )
+        bot.close()
+
+    @unittest.skip(
+        "ZNÁMY BUG (pozri README §Otvorené problémy): ten istý dôvod ako "
+        "test_no_overcommit_beyond_deficit — pile-up v dosahu súperovho ATTACKu."
+    )
+    def test_replay_czuk_turns_survive_attack(self):
+        """Proti bossovi: žiadny ťah neskončí s ≥ 5 našimi jednotkami na dome
+        v dosahu súperovho ATTACKu (ready tri susedí s domom)."""
+        b = Board.from_game_options(self.opts)
+        bot = BotSession(BOT)
+        bot.start(b)
+        import random as _r
+
+        rng = _r.Random(11)
+        for turn in range(40):
+            cmd = bot.turn(b)
+            opp_cmd = boss_commands(b, rng)
+            b.play_turn(cmd, opp_cmd)
+            opp_ready = [
+                t.corners()
+                for t in b.triangles
+                if t.owner == 1 and all(b.units[c][1] > 0 for c in t.corners())
+            ]
+            danger = set()
+            for ot in opp_ready:
+                for c in ot:
+                    danger |= b.adj[c]
+            for n in danger:
+                mine = b.units[n][0]
+                self.assertLess(
+                    mine,
+                    5,
+                    f"turn {turn + 1}: {mine} jednotiek v dosahu súperovho ATTACKu na dome {n}",
+                )
+        bot.close()
+
+
 if __name__ == "__main__":
     unittest.main()

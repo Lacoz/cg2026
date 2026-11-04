@@ -17,8 +17,9 @@ předlžovania kontextu — čo funguje, čo nie a prečo.
 | `scoring.yaml` | Opponent `default` ×5, brány: win_rate ≥ 0.2, median ≥ 3, crash ≤ 0.5. Boss sekcia zapoznámkovaná (NO_BOSS v Wood). |
 | `tmp_seed_*.txt` | Full game_options seedov na lokálny replay (466 = Arnaud.Net, 328 = M_C, 436/−7474/−8423/194). |
 
-**Posledná validácia `bot.py`**: unit testy OK · solo sim seed 466 → skóre 125 / 13 trojuholníkov @ T21 ·
-online `./cg test --games 2` → **2/2 WIN** (134:−1, 293:−1), všetky brány prešli.
+**Posledná validácia `bot.py` (2026-11-04, po czuk opravách)**: unit testy 10 OK (2 skip = známy bug) ·
+online `./cg test --games 2` → **2/2 WIN** (134:−1, **3459:11**), všetky brány prešli ·
+opravy: spawn-corner uniqueness, `en_route` accounting, `trap_risk`, pass-through parking block.
 
 ---
 
@@ -59,8 +60,9 @@ Fázy v ťahu, v tomto poradí:
 
 | Súper | Správanie | Ako proti nemu |
 |---|---|---|
-| `default` (Wood) | = level-2 boss: 3 jednotky na najbližší tri, 1 spawn/ťah, zvyšok random walk; ATTACK až pri > 10 jednotkách | Aktuálny bot ho bije 100 % (win rate, 8+ hier) |
-| **Arnaud.Net** (rank 22, Silver, `agent_id=6844116`) | **Mass-spawn 5–16/ťah** (spawn na všetko, vždy), recapture cyklus, ATTACK na naše stacky. Do T20 má 2–3× našu armádu. | Ešte neporazený. Treba: rýchlejší rast počtu tri (viac engine) + rozptýlenie jednotiek (anti-ATTACK) + možno 1:1 kópia ich stratégie |
+| `default` (Wood) | = level-2 boss: 3 jednotky na najbližší tri, 1 spawn/ťah, zvyšok random walk; ATTACK až pri > 10 jednotkách | Aktuálny bot ho bije 100 % (win rate, 10+ hier) |
+| **czuk** (rank 53, `agent_id=6845057`) | Rovnaký snowball ako Arnaud: 2–8 spawnov/ťah, OUR pile-ups trestal ATTACKom (6 mŕtvych na f52) a surroundom. Po opravách (2026-11-04): ATTACK katastrofa zmizla, surround ≤ 4, ale spawn tempo 1/ťah vs ich 2–8/ťah rozhodne koncovku. LOSS −1:73 (game 916451418). | Rovnaké ako Arnaud: rýchlejší rast počtu tri |
+| **Arnaud.Net** (rank 22, `agent_id=6844116`) | **Mass-spawn 5–16/ťah**, recapture cyklus, ATTACK na naše stacky. Do T20 má 2–3× našu armádu. | Ešte neporazený. Treba: rýchlejší rast počtu tri (viac engine) + rozptýlenie jednotiek (anti-ATTACK) + možno 1:1 kópia ich stratégie |
 | **M_C** (rank ~50, `agent_id=6843883`) | Podobný snowball, menej presný | Remíza do stredu hry, prehráva koncovku |
 | `ctuanle` (rank 483, `agent_id=6843670`) | Slabý — bieme ho (4806:26) | — |
 
@@ -69,18 +71,32 @@ Hrať proti konkrétnemu hráčovi: `./cg replay --seed <S> --opponent <agent_id
 
 ## Otvorené problémy / next steps (prioritne)
 
-1. **Prehra s Arnaud.Net na `seed=4660678065917950000`** — diagnóza v chate: prehrávame spawn tempo
-   (oni 5–16/ťah z veľkého počtu tri, my 1–3). Návrhy:
-   - pridať **agresívnejšiu expanziu** (viac misií/capture/ťah — missions experiment mal správnu myšlienku,
-     ale online zamrzal; pozri `bot_missions_backup.py` a nájdi prečo — lokalný sim to neodhalil!),
-   - **anti-ATTACK rozptýlenie**: nikdy > 2 jednotky na jednom dome v `attack_danger`,
-   - uvažuj o **1:1 port Arnaudovho prístupu** (spawn na všetko, vždy) + náš engine refill ako poistka.
-2. **Missions backup**: online pasivita (spawn=2 pri `default`) — bug je niekde v interakcii
-   misie×forbidden×vacate; lokálny sim ukazoval zdravý rast → **sim nezahŕňa niečo dôležité**
-   (napr. presné poradie fáz / remaining pri spawn + move v tom istom ťahu).
-3. **Lokálny sim vs realita**: sim má jednu vlnu ATTACK (realita = multi-frame), nepoužívaj ho ako
+1. **Spawn tempo vs silní súperi (czuk, Arnaud, M_C)** — oni 2–16 spawnov/ťah, my 1–3.
+   Náš temp je limitovaný počtom vlastnených trojuholníkov × stagger (1 spawn / 3 ťahy / tri).
+   Cesta hore: **rýchlejšia expanzia** (viac capture/ťah). Missions experiment mal správnu myšlienku,
+   ale online zamrzal — pozri `bot_missions_backup.py`, bug nezistený (lokálny sim vyzeral zdravo!).
+2. **ANTI-PILEUP (známy bug, 2 skipnuté testy v `tests/test_game_sim.py`)**: `SPAWN` landing +
+   **pass-through parking** (jednotka poslaná na vzdialený cieľ sa 1. krokom zastaví na medzidome —
+   ak je to roh tri v dosahu súperovho ATTACKu, nevedomo tam naskladnáme 4–9 jednotiek a jeden
+   súperov ATTACK ich zmaže). Opravené čiastočne: spawn corner uniqueness (per ťah), `en_route`
+   accounting, pass-through block (parked ≥ 3), `trap_risk` deprioritizácia, emptier-corner spawn
+   preference. Stále nepostačuje — potrebné **path-aware end-position planning** (plánovať, kde
+   jednotky really skončia: `first_step(src,dst)` pre každý move a počítať to do `parked`).
+3. **Rebuild po t=0**: keď prídeme o všetky tri, spawn sa obnoví len cez rebuild mode —
+   pomalé. Zvážiť prioritnú „regroup“ fázu.
+4. **Lokálny sim vs realita**: sim má jednu vlnu ATTACK (realita = multi-frame), nepoužívaj ho ako
    jediný signál — pred submitom vždy 2–3 online hry vs `default`.
-4. **BOT_SPEC.md** je čiastočne zastaraný (písal sa pre staršie verzie bota).
+5. **BOT_SPEC.md** je čiastočne zastaraný (písal sa pre staršie verzie bota).
+
+### Testy (2026-11-04)
+
+`tests/test_game_sim.py` rozšírené o `czukRegressionTests` (10 testov, 2 skipnuté):
+- `test_never_two_spawns_on_same_corner` — 30 ťahov solo: žiadne 2 SPAWN na ten istý roh (✅ prechádza)
+- `test_no_overcommit_beyond_deficit` — ⏭️ skip: stack > opp+3 na dome ešte vzniká (boss port)
+- `test_replay_czuk_turns_survive_attack` — ⏭️ skip: ≥ 5 jednotiek v dosahu súperovho ATTACKu (boss port)
+- `boss_commands()` v testoch = port level-2 Boss.cs (rovnaký súper ako `default`) — použi ho
+  pre vlastné scenáre: `b.play_turn(bot.turn(b), boss_commands(b, rng))`.
+- Princíp: **regresné testy píš z reálnych online prehr** (game_id → log → čo nás zabilo → test).
 
 ## Workflow (overené)
 

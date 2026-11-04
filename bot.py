@@ -150,6 +150,7 @@ while True:
     # 3. Jointly optimize SPAWN corner choices + 1-turn (`d <= 1`) unit movements!
     avail = dict(my)
     locked_end = {h: 0 for h in houses}
+    spawn_houses = {h: 0 for h in houses}
     cands = [t for t in tris if t[3] != 0 and t[4]]
 
     # Keep anchors on triangles that remain owned (not used for SPAWN/ATTACK)
@@ -180,6 +181,28 @@ while True:
         h: opp.get(h, 0) + sum(opp.get(n, 0) for n in adj.get(h, ()) if n not in home_side or opp.get(n, 0) > 0)
         for h in houses
     }
+
+    # Units committed this turn that arrive on `h` NEXT turn (multi-step moves).
+    # Without this, two triangles sharing a corner both send units to it and the
+    # excess piles up into one enemy ATTACK target (czuk killed 6 units this way).
+    en_route = {}
+
+    # TRAP RISK: if we stack units on corner H of triangle t, the opponent can
+    # ATTACK H next turn from any of THEIR ready triangles that (a) can reach H
+    # (has a corner adjacent to H) and (b) we do NOT break by capturing t
+    # (shares no corner with t). Deprioritize such captures — the stack dies.
+    def trap_risk(t):
+        cs = set(t[:3])
+        for H in t[:3]:
+            if H not in attack_danger:
+                continue
+            for ot in opp_tris:
+                ocs = set(ot)
+                if ocs & cs:
+                    continue  # capturing t breaks ot — no trap
+                if any(dist(c, H) == 1 for c in ot):
+                    return 1
+        return 0
 
     cand_home_deg = {
         h: sum(1 for tr in cands if h in tr[:3] and tr[:3] not in used_tris and all(c in home_side for c in tr[:3]))
@@ -218,17 +241,21 @@ while True:
         )
         imm_cands = imm_cands[:7]
 
-    def can_satisfy(sub, cur_avail, cur_locked):
+    def can_satisfy(sub, cur_avail, cur_locked, used_sp):
         corners_set = {c for t in sub for c in t[:3]}
         reqs = {c: max(0, (opp.get(c, 0) + 1) - cur_locked.get(c, 0)) for c in corners_set}
 
         sp_choices = []
-        used_sp_corners = set()
+        used_sp_corners = set(used_sp)
         for corners in to_spawn:
+            # HARD exclusion: never spawn two units onto the same corner this turn
+            # (they cannot move and pile up into one enemy ATTACK target).
+            options = [c for c in corners if c not in used_sp_corners] or list(corners)
             best_c = max(
-                corners,
+                options,
                 key=lambda c: (
                     2 if reqs.get(c, 0) > 0 else (1 if (c in corners_set and c not in used_sp_corners) else 0),
+                    -min(my.get(c, 0), 3),  # prefer emptier corners — no spawn piles
                     -sum(cur_avail.get(u, 0) for u in houses if dist(u, c) <= 1) if reqs.get(c, 0) > 0 else -999,
                     0 if c not in used_sp_corners else -1,
                     cand_home_deg[c],
@@ -281,19 +308,21 @@ while True:
 
     best_imm = None
     if imm_cands:
+        spawned_corners = set()
         n_imm = len(imm_cands)
         subsets_to_try = []
         for r in range(min(3, n_imm), 0, -1):
             subsets_to_try.extend(itertools.combinations(imm_cands, r))
         for sub in subsets_to_try:
-            res = can_satisfy(sub, avail, locked_end)
+            res = can_satisfy(sub, avail, locked_end, spawned_corners)
             if res is not None:
                 sp_choices, moves, total_add, resets, reach_sc = res
                 opp_owned = sum(1 for t in sub if t[3] == 1)
                 home_cnt = sum(1 for t in sub if all(c in home_side for c in t[:3]))
                 safe_cnt = sum(1 for t in sub if all(opp_reach1.get(c, 0) == 0 for c in t[:3]))
+                trap_cnt = sum(1 for t in sub if trap_risk(t))
                 hub_sc = sum(tri_hub[t[:3]][0] * 10 + tri_hub[t[:3]][1] for t in sub)
-                sc = (len(sub), safe_cnt, home_cnt, opp_owned, reach_sc, resets, -total_add, hub_sc)
+                sc = (len(sub), safe_cnt, -trap_cnt, home_cnt, opp_owned, reach_sc, resets, -total_add, hub_sc)
                 if best_imm is None or sc > best_imm[0]:
                     best_imm = (sc, sub, sp_choices, moves)
 
@@ -303,6 +332,7 @@ while True:
             others = [c for c in corners if c != best_c]
             cmds.append(f"SPAWN {best_c} {others[0]} {others[1]}")
             locked_end[best_c] = locked_end.get(best_c, 0) + 1
+            spawn_houses[best_c] += 1
         for t in sub:
             if t in cands:
                 cands.remove(t)
@@ -310,14 +340,18 @@ while True:
             avail[src] -= take
             avail_total -= take
             locked_end[dst] = locked_end.get(dst, 0) + take
+            en_route[dst] = en_route.get(dst, 0) + take
             if src != dst:
                 cmds.append(f"MOVE {src} {dst} {take}")
     else:
+        spawned_corners = set()
         for corners in to_spawn:
+            options = [c for c in corners if c not in spawned_corners] or list(corners)
             best_c = max(
-                corners,
+                options,
                 key=lambda c: (
                     c in home_side,
+                    -min(my.get(c, 0), 3),  # prefer emptier corners — no spawn piles
                     cand_home_deg[c],
                     cand_any_deg[c],
                     -blocked_deg[c],
@@ -328,6 +362,8 @@ while True:
             others = [c for c in corners if c != best_c]
             cmds.append(f"SPAWN {best_c} {others[0]} {others[1]}")
             locked_end[best_c] = locked_end.get(best_c, 0) + 1
+            spawn_houses[best_c] += 1
+            spawned_corners.add(best_c)
 
     forbidden_end = set()
     for rt in resettable_tris:
@@ -394,11 +430,15 @@ while True:
     while avail_total > 0 and cands:
         best = None
         active_srcs = [h for h, cnt in avail.items() if cnt > 0]
+        # End-of-turn position estimate: units stay put or land on first_step of their move.
+        # Prevents unknowingly parking a pile on a house the opponent can ATTACK next round.
+        parked = {h: my.get(h, 0) + spawn_houses.get(h, 0) for h in houses}
         for t in cands:
             corners = t[:3]
             if stay_home and best_imm is not None and not all(c in home_side for c in corners):
                 continue
             temp_avail = dict(avail)
+            temp_parked = dict(parked)
             temp_locked = dict(locked_end)
             moves = []
             max_d = 0
@@ -410,7 +450,11 @@ while True:
                 key=lambda c: sum(temp_avail.get(u, 0) for u in active_srcs if dist(u, c) <= 2),
             )
             for target in ordered_corners:
-                need = (opp.get(target, 0) + 1) - temp_locked.get(target, 0)
+                need = (
+                    (opp.get(target, 0) + 1)
+                    - temp_locked.get(target, 0)
+                    - en_route.get(target, 0)
+                )
                 if need <= 0:
                     continue
                 rem = need
@@ -432,8 +476,15 @@ while True:
                     step = first_step(h, target)
                     if d > 1 and step in forbidden_end:
                         continue
+                    # Do not route units THROUGH a house that already holds/parks
+                    # 3+ of ours — piles die to a single ATTACK or surround (czuk).
+                    # Arriving at the target corner itself (step == target) is allowed.
+                    if d > 1 and step != target and temp_parked.get(step, 0) >= 3:
+                        continue
                     take = cnt if cnt < rem else rem
                     temp_avail[h] = cnt - take
+                    temp_parked[h] = temp_parked.get(h, 0) - take
+                    temp_parked[step] = temp_parked.get(step, 0) + take
                     rem -= take
                     total_req += take
                     moves.append((h, target, take, d))
@@ -454,6 +505,7 @@ while True:
             is_home = 0 if all(c in home_side for c in corners) else 1
             score = (
                 0 if max_d <= 1 else max_d,
+                trap_risk(t),
                 is_home,
                 total_req if max_d <= 1 else 0,
                 -shared_ready if max_d <= 1 else 0,
@@ -472,6 +524,7 @@ while True:
         avail_total -= total_req
         for src, dst, take, d in moves:
             avail[src] -= take
+            en_route[dst] = en_route.get(dst, 0) + take
             step = first_step(src, dst)
             if max_d > 1 and src == dst and src in must_vacate:
                 avail[src] += take
@@ -510,7 +563,8 @@ while True:
             for c in t[:3]:
                 if c in staged_targets:
                     continue
-                need = (opp.get(c, 0) + 1) - locked_end.get(c, 0)
+                # en_route: units already committed (greedy/imm) that arrive next turn
+                need = (opp.get(c, 0) + 1) - locked_end.get(c, 0) - en_route.get(c, 0)
                 while need > 0 and rem_units:
                     valid_u = []
                     for u in set(rem_units):
@@ -521,7 +575,8 @@ while True:
                             continue
                         if stay_home and step not in home_side and u in home_side:
                             continue
-                        if step in attack_danger and locked_end.get(step, 0) >= 2:
+                        # no pass-through parking on 3+ piles (czuk scenario)
+                        if step != c and my.get(step, 0) + locked_end.get(step, 0) >= 3:
                             continue
                         valid_u.append(u)
                     if not valid_u:
@@ -538,6 +593,9 @@ while True:
                     rem_units.remove(best_u)
                     step = first_step(best_u, c)
                     locked_end[step] = locked_end.get(step, 0) + 1
+                    if dist(best_u, c) > 1:
+                        # committed en route — arrives in a later turn
+                        en_route[c] = en_route.get(c, 0) + 1
                     need -= 1
                     if best_u != c:
                         cmds.append(f"MOVE {best_u} {c} 1")
@@ -575,9 +633,22 @@ while True:
                             cmds.append(f"MOVE {best_u} {c} 1")
 
     # 6. Any units still on `must_vacate` (or still idle on `home_side`) step to a safe, non-forbidden `home_side` HUB corner!
+    # PLUS anti-ATTACK spread: never keep more than 2 of our units on a house that
+    # sits in the blast radius of an opponent-ready triangle (czuk killed 6 with one ATTACK).
     for src in rem_units:
         neighs = list(adj.get(src, ()))
-        if neighs and (src in must_vacate or src not in home_side or corner_deg.get(src, 0) == 0 or locked_end.get(src, 0) >= 2):
+        excess = 0
+        if src in attack_danger:
+            sitting = my.get(src, 0)
+            excess = max(0, sitting - 2)
+        must_move = (
+            src in must_vacate
+            or src not in home_side
+            or corner_deg.get(src, 0) == 0
+            or locked_end.get(src, 0) >= 2
+            or excess > 0
+        )
+        if neighs and must_move:
             dst = min(
                 neighs,
                 key=lambda n: (
@@ -594,6 +665,9 @@ while True:
             )
             locked_end[dst] = locked_end.get(dst, 0) + 1
             cmds.append(f"MOVE {src} {dst} 1")
+            if excess > 0:
+                my[src] = my.get(src, 0) - 1
+                excess -= 1
 
     ui = f"v={army} t={len(owned)}"
     print(("MSG " + ui + ";" + ";".join(cmds)) if cmds else ("MSG " + ui), flush=True)
