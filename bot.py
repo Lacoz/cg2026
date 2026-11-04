@@ -783,6 +783,9 @@ while True:
             our_sp.append(int(f[1]))
     prev = (my0, op0, owner, opcap, [(a, b, n) for (a, b), n in moves.items()], our_sp, our_atk)
     ms = int((time.perf_counter() - t_start) * 1000)
-    cmds.insert(0, f"MSG u{army} t{sum(1 for o in owner if o == 0)} {ms}ms p{passes} "
-                   f"a{pk[2]:.2f}/{pk[3]:.2f}/{pk[4]:.2f} k{keep:.2f} c{act:.1f} x{len(opp_attacks)}")
+    def f2(v):
+        return f"{v:.2f}".rstrip("0").rstrip(".").lstrip("0") or "0"
+
+    # the viewer shows only ~20 characters
+    cmds.insert(0, f"MSG a{f2(pk[2])}/{f2(pk[3])}/{f2(pk[4])} k{f2(keep)} c{f2(act)} x{len(opp_attacks)} {ms}ms p{passes}")
     print(";".join(cmds), flush=True)
