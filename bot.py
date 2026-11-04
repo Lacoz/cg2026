@@ -24,7 +24,7 @@ P = {
     "EXP": 0.0,  # per unit in a >=3 stack inside enemy ATTACK reach
     "EXP2": 0.0,  # per unit in a 2-stack inside enemy ATTACK reach
     "DANGER_CAP": 0.0,  # danger weight of triangles the enemy can capture this turn
-    "SURR": 0.0,  # per unit on a house the enemy could surround next turn
+    "SURR": 0.0,  # weight (in units) of the expected loss to being surrounded next turn
     "SPR": 0.4,  # per surplus unit on a house
     "FW": 1.0,  # pull per step toward the assigned corner
     "FW_IDLE": 0.3,  # pull per step for unassigned units
@@ -45,6 +45,7 @@ P = {
     "SP_HOLD": 1,  # hold (do not spawn) triangles with enemy units on or next to a corner
     "SP_R": 1,  # 0: only enemy units on the corners count, 1: also on their neighbors
     "SP_HUBN": 3,  # ... only on corners shared by at least this many of our triangles
+    "SP_ARMY": 1.0,  # ... only while our army is at least this fraction of the enemy's
     "SP_CASH": 1,  # still spawn a held triangle the enemy can take this turn anyway
     "FREE_SPAWN_TURNS": 40,
     "CAP_MIN": 20,
@@ -84,6 +85,12 @@ cap_act = 0
 own_n = 0
 own_kept = 0
 opp_attacks = []  # stack sizes the opponent killed
+sur_lost = 0  # our units lost without an attack (surrounded)
+# P(our units on a house get surrounded | enemy can reach every neighbour, enemy units still
+# needed to flip them all), from ~80 logged games; scaled by sur_act / sur_pred per opponent
+SUR_TAB = [0.5, 0.12, 0.05, 0.015, 0.005]
+sur_pred = 0.0
+sur_act = 0
 prev = None  # (my, op, owner, opcap, our moves, our spawns, our attacks)
 
 
@@ -99,7 +106,7 @@ def cap_feat(i, mine, theirs):
 
 def learn(my, op, owner):
     """Update the opponent model from what changed since our previous turn."""
-    global cap_pred, cap_act, own_n, own_kept
+    global cap_pred, cap_act, own_n, own_kept, sur_lost, sur_pred, sur_act
     pmy, pop, pown, popcap, pmoves, pspawns, patks = prev
     T_ = len(tri_c)
     exp = pmy[:]
@@ -137,6 +144,16 @@ def learn(my, op, owner):
                     deficit[x] -= v
                 hits += 1
                 opp_attacks.append(pmy[h])
+    sur_lost += sum(d for d in deficit if d > 0)
+    for h in range(N):
+        if exp[h] <= 0:
+            continue
+        ns = nb[h]
+        if not all(pop[n] + sum(pop[m] for m in nb[n]) > exp[n] for n in ns):
+            continue
+        need = sum(exp[n] - pop[n] + 1 for n in ns if pop[n] <= exp[n])
+        sur_pred += SUR_TAB[need if need < 4 else 4]
+        sur_act += deficit[h] > 0
     if kmax > 0:
         k = min(kmax, 5)
         atk_n[k] += 1
@@ -296,7 +313,11 @@ while True:
     for i in range(T):
         if owner[i] == 0 and not used[i] and army + len(spawn_tris) < cap:
             cs = tri_c[i]
-            if P["SP_HOLD"] and any(near_op[c] > 0 and mine_at[c] >= P["SP_HUBN"] for c in cs):
+            if (
+                P["SP_HOLD"]
+                and army >= oarmy * P["SP_ARMY"]
+                and any(near_op[c] > 0 and mine_at[c] >= P["SP_HUBN"] for c in cs)
+            ):
                 lost = all(op[c] + sum(op[n] for n in nb[c]) > my[c] for c in cs)
                 if not (P["SP_CASH"] and lost):
                     continue
@@ -480,6 +501,7 @@ while True:
 
     use_dng = EXP != 0 or EXP2 != 0
     use_surr = SURR != 0
+    SURR_W = SURR * WU * min(4.0, max(0.3, (sur_act + 1.0) / (sur_pred + 1.0)))
 
     # nmine[x] / nopp[x]: neighbours of x where we / the enemy have strictly more units
     deg = [len(nb[x]) for x in range(N)]
@@ -528,8 +550,14 @@ while True:
             else:
                 if use_dng and c >= 2 and danger[x] > 0:
                     v -= danger[x] * (EXP * c if c >= 3 else EXP2 * c)
-                if use_surr and all(oreach[n] > cnt[n] for n in nb[x]):
-                    v -= SURR * c
+                if use_surr:
+                    ns = nb[x]
+                    if all(oreach[n] > cnt[n] for n in ns):
+                        need = 0
+                        for n in ns:
+                            if op[n] <= cnt[n]:
+                                need += cnt[n] - op[n] + 1
+                        v -= SURR_W * c * SUR_TAB[need if need < 4 else 4]
                 if c > RISK_NET and risk[x] > 0:
                     v -= RISK * (c - RISK_NET) * pk[c if c < 5 else 5] * risk[x]
                 if c > o + 1:
@@ -864,5 +892,5 @@ while True:
         return f"{v:.2f}".rstrip("0").rstrip(".").lstrip("0") or "0"
 
     # the viewer shows only ~20 characters
-    cmds.insert(0, f"MSG a{f2(pk[2])}/{f2(pk[3])}/{f2(pk[4])} k{f2(keep)} c{f2(act)} x{len(opp_attacks)} {ms}ms p{passes}")
+    cmds.insert(0, f"MSG a{f2(pk[2])}/{f2(pk[3])}/{f2(pk[4])} k{f2(keep)} c{f2(act)} x{len(opp_attacks)} s{sur_lost} {ms}ms p{passes}")
     print(";".join(cmds), flush=True)

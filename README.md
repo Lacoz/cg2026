@@ -132,6 +132,20 @@ Online na seedoch prehier (`SP_HUBN=3`): kosynus **W 105:−1** (bez opravy L �
 Erickpi W 142:−1, sabuka W 121:−1, Dinnerwolph **W 132:−1** (predtým vždy L), kosynus seed 2 L −1:312
 (iný vzor — prerástol nás od T10). `SP_HUBN=4` bolo horšie (L s Erickpi aj Dinnerwolph).
 
+### Prehra s DmitryYudakov → ekonomika spawnov, nie taktika (2026-11-04 16:00)
+
+Game 916585344: eliminovaní v T39 (0:75 jednotiek) pri vedení 136:120 na skóre. Prvá príčina:
+hub hold blokoval spawny (spawnli sme 60× zo 136 vlastnených trojuholník-ťahov, on 111 zo 114).
+Oprava `SP_ARMY=1.0`: hub hold platí len kým armáda ≥ súperova. Proti Dmitrymu to nestačilo —
+všetky varianty (army −1:101, hubold −1:99, nohold −1:90, SURR −1:92) prehrali rovnako: do T12
+sme vyrovnaní/vpredu, potom nás prespawnuje ~2:1 (spawny 42:89, 60:117) a v presile nás dobíja
+obkľúčením (SUR straty 29–36 našich vs 4–10 jeho). Vo výhrach je pomer spawnov opačný (60:25).
+
+Kalibrovaný surround risk (`SURR`, `SUR_TAB` + per-súper `sur_act/sur_pred` v `learn()`) ostáva
+v kóde, ale **vypnutý (`SURR=0.0`)**: lokálne 178/280 vs army, online 0/4 s kosynus+Erickpi
+(army 3/4) a Dmitryho neporazil. Online výsledky sú šumové (timing mení počet passov) —
+jedna hra nič nedokazuje.
+
 Čo NEpomohlo (netreba skúšať znova): `DANGER_CAP>0`, `EXP2>0` (defenzíva = capture stall, lokálne 2/80),
 `CONTEST_D`, ladenie `EXP/V_CAP/V_LOSE/THREAT/SPR/WU` (všetko šum).
 
