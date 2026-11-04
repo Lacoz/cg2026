@@ -109,24 +109,43 @@ while True:
             best_kill >= 4
             or (best_kill >= 3 and army >= 18 and len(usable) - len(used_tris) >= 2)
             or (best_kill >= 2 and army >= 28 and len(usable) - len(used_tris) >= 3)
-        ):
+        ) and opp.get(best_n, 0) > 0:
             cmds.append(f"ATTACK {corners[0]} {corners[1]} {corners[2]} {best_n}")
             used_tris.add(corners)
             opp[best_n] = 0
             for c in corners:
                 my[c] = max(0, my[c] - 1)
 
-    # 2. Decide which remaining usable triangles will SPAWN this turn
+    # 2. Staggered engine cycles: split usable owned triangles into a SPAWN group and a HOLD group.
+    # Spawning neutralizes a triangle (owner -> None), so spawning on ALL of them at once kills our
+    # scoring base AND leaves nothing to spawn on next turn. Instead: high-hub triangles HOLD
+    # (keep scoring + stay spawn-ready), low-hub triangles SPAWN this turn. Next turn the roles
+    # swap as vacated units restaff the spawn group. This is how Arnaud.Net kept spawning 5-16
+    # units/turn while always keeping a scoring base.
     max_army = max(36, opp_army + 12)
     to_spawn = []
+    hold_group = []
     if army < max_army:
-        for t in usable:
-            corners = t[:3]
-            if corners in used_tris:
-                continue
-            if army + len(used_tris) < 26 or len(usable) - len(used_tris) > 2 or army <= opp_army + 6:
-                used_tris.add(corners)
-                to_spawn.append(corners)
+        spawnable = [t for t in usable if t[:3] not in used_tris]
+        # High-hub triangles anchor the most adjacent triangles — keep those scoring.
+        spawnable.sort(key=lambda t: (-tri_hub[t[:3]][0], -tri_hub[t[:3]][1]))
+        if len(spawnable) >= 4:
+            half = (len(spawnable) + 1) // 2
+            hold_group = [t[:3] for t in spawnable[:half]]
+            spawn_candidates = spawnable[half:]
+        elif len(spawnable) >= 2:
+            # Small base: still keep the best triangle scoring + spawn-ready, spawn on the rest
+            hold_group = [spawnable[0][:3]]
+            spawn_candidates = spawnable[1:]
+        else:
+            # Early game: grow as fast as possible
+            spawn_candidates = spawnable
+        for t in spawn_candidates:
+            if army + len(to_spawn) >= max_army:
+                break
+            if army + len(to_spawn) < 26 or len(spawn_candidates) - len(to_spawn) > 0 or army <= opp_army + 6:
+                to_spawn.append(t[:3])
+                used_tris.add(t[:3])
 
     # 3. Jointly optimize SPAWN corner choices + 1-turn (`d <= 1`) unit movements!
     avail = dict(my)
@@ -162,7 +181,6 @@ while True:
         for h in houses
     }
 
-    # Precompute fast lookup tables per house so inner loops are O(1)!
     cand_home_deg = {
         h: sum(1 for tr in cands if h in tr[:3] and tr[:3] not in used_tris and all(c in home_side for c in tr[:3]))
         for h in houses
@@ -176,6 +194,8 @@ while True:
         for h in houses
     }
 
+    # 4. Greedy assignment to capture triangles (me_cap=True, owner!=0) with available units (`avail`).
+    # 4A. First find all triangles that can be captured THIS turn (`max_d <= 1`)!
     imm_cands = [
         t
         for t in cands
@@ -187,8 +207,6 @@ while True:
             for c in t[:3]
         )
     ]
-
-    # Sort and cap `imm_cands` to at most 7 best immediate triangles!
     if len(imm_cands) > 7:
         imm_cands.sort(
             key=lambda t: (
@@ -200,7 +218,7 @@ while True:
         )
         imm_cands = imm_cands[:7]
 
-    def can_satisfy_with_spawns(sub, cur_avail, cur_locked):
+    def can_satisfy(sub, cur_avail, cur_locked):
         corners_set = {c for t in sub for c in t[:3]}
         reqs = {c: max(0, (opp.get(c, 0) + 1) - cur_locked.get(c, 0)) for c in corners_set}
 
@@ -225,7 +243,7 @@ while True:
                 reqs[best_c] -= 1
 
         total_add = sum(reqs.values())
-        if total_add > avail_total:
+        if total_add > sum(cur_avail.values()):
             return None
 
         rem_avail = dict(cur_avail)
@@ -268,7 +286,7 @@ while True:
         for r in range(min(3, n_imm), 0, -1):
             subsets_to_try.extend(itertools.combinations(imm_cands, r))
         for sub in subsets_to_try:
-            res = can_satisfy_with_spawns(sub, avail, locked_end)
+            res = can_satisfy(sub, avail, locked_end)
             if res is not None:
                 sp_choices, moves, total_add, resets, reach_sc = res
                 opp_owned = sum(1 for t in sub if t[3] == 1)
@@ -316,9 +334,62 @@ while True:
         if all(locked_end.get(c, 0) == 0 for c in rt):
             forbidden_end.update(rt)
 
-    # 4B. Greedy assignment for remaining triangles.
+    # 4B. REFILL spawn-ready corners BEFORE captures: owned triangles with an empty corner
+    # cannot SPAWN (spawn needs >= 1 unit on every corner). This is the spawn engine —
+    # without refill the engine dies and we stop growing (how Arnaud.Net outran us).
+    # Runs before capture assignment so engines always get their units first.
+    hold_corners = [c for cs in hold_group for c in cs]
+    engine_tris = hold_group + [
+        t[:3] for t in owned if t[:3] not in used_tris and t[:3] not in hold_group
+    ]
+    # Sort engines: hold_group first (spawn-ready next turn), then fewest missing corners
+    engine_tris.sort(
+        key=lambda cs: (
+            0 if cs in hold_group else 1,
+            sum(1 for c in cs if locked_end.get(c, 0) == 0),
+            -tri_hub[cs][0],
+            -tri_hub[cs][1],
+        )
+    )
+    for cs in engine_tris:
+        if avail_total <= 0:
+            break
+        for c in cs:
+            if locked_end.get(c, 0) == 0 and avail_total > 0:
+                # Few engines left -> unlimited reach, we MUST bring the engine back online
+                reach = 999 if len(engine_tris) <= 2 else (3 if cs in hold_group else 2)
+                srcs = [u for u in houses if avail.get(u, 0) > 0 and dist(u, c) <= reach and (u != c or u not in must_vacate)]
+                if srcs:
+                    srcs.sort(key=lambda u: (dist(u, c), -avail[u]))
+                    u = srcs[0]
+                    avail[u] -= 1
+                    avail_total -= 1
+                    step = first_step(u, c)
+                    locked_end[step] = locked_end.get(step, 0) + 1
+                    if u != c:
+                        cmds.append(f"MOVE {u} {c} 1")
+
+    # 4C. Greedy assignment for remaining triangles.
     stay_home = opp_army > 0 and army < opp_army + 10
     max_allowed_d = 2 if (stay_home and best_imm is not None) else 999
+
+    # REBUILD MODE: when we own NO triangles (scoring base wiped by opponent ATTACK),
+    # drop all territorial restrictions and throw everything at the single fastest capturable
+    # triangle — restoring the spawn engine matters more than safety or position.
+    # (Only after the game has progressed — at turn 1 nothing is owned by anyone yet.)
+    rebuild = len(owned) == 0 and cands and (my_score > 0 or opp_score > 0) and army > 0
+    if rebuild:
+        stay_home = False
+        max_allowed_d = 999
+        src_houses = [u for u in houses if avail.get(u, 0) > 0]
+        if src_houses:
+            cands.sort(
+                key=lambda t: (
+                    max(min(dist(u, c) for u in src_houses) for c in t[:3]),
+                    -tri_hub[t[:3]][0],
+                )
+            )
+        cands = cands[:1]
 
     while avail_total > 0 and cands:
         best = None
@@ -334,7 +405,6 @@ while True:
             sum_d = 0
             total_req = 0
             ok = True
-            # Order the 3 corners by fewest close available units (most constrained corner first) instead of 6 permutations!
             ordered_corners = sorted(
                 corners,
                 key=lambda c: sum(temp_avail.get(u, 0) for u in active_srcs if dist(u, c) <= 2),
@@ -411,14 +481,17 @@ while True:
             if src != dst:
                 cmds.append(f"MOVE {src} {dst} {take}")
 
-    # 5. Stage any remaining units (`avail`) toward the BEST local uncaptured triangle on `home_side`,
+    # 4D. Stage any remaining units (`avail`) toward the BEST local uncaptured triangle on `home_side`,
     # assigning 1 unit per needed corner of that triangle before moving on to the next triangle!
-    home_cands = [t for t in cands if all(c in home_side for c in t[:3])]
-    local_cands = home_cands if (stay_home and home_cands) else list(cands)
-
     rem_units = []
     for src in sorted(avail):
         rem_units.extend([src] * avail[src])
+
+    if rebuild:
+        local_cands = list(cands)
+    else:
+        home_cands = [t for t in cands if all(c in home_side for c in t[:3])]
+        local_cands = home_cands if (stay_home and home_cands) else list(cands)
 
     if rem_units and local_cands:
         local_cands.sort(
@@ -471,7 +544,23 @@ while True:
                 if need <= 0:
                     staged_targets.add(c)
 
-    # 5B. Reinforce threatened border corners of captured triangles if spare units remain adjacent
+    # 5B. Capture ALL currently-OWNED triangles (`owner == 0`) whose corners we can fully staff this turn
+    # so they keep scoring! Their units stay on the corners (no `me_cap` reset needed since owner==0 already).
+    scoring_hold = [t[:3] for t in owned if t[:3] not in used_tris]
+    for cs in scoring_hold:
+        for c in cs:
+            if locked_end.get(c, 0) == 0 and rem_units:
+                # Prefer a unit already adjacent (d<=1) so it stays on the corner this turn
+                valid_u = [u for u in set(rem_units) if dist(u, c) <= 1 and (u != c or u not in must_vacate)]
+                if valid_u:
+                    best_u = min(valid_u, key=lambda u: (dist(u, c), u not in must_vacate))
+                    rem_units.remove(best_u)
+                    step = first_step(best_u, c)
+                    locked_end[step] = locked_end.get(step, 0) + 1
+                    if best_u != c:
+                        cmds.append(f"MOVE {best_u} {c} 1")
+
+    # 5C. Reinforce threatened border corners of captured triangles if spare units remain adjacent
     if best_imm is not None and rem_units:
         _, sub, _, _ = best_imm
         for t in sub:
