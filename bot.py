@@ -35,6 +35,9 @@ FOCUS = None
 FOCUS_AGE = 0
 LAST_FOCUS = None  # recently captured focus — keep its cluster intact for chaining
 TURN_NO = 0  # game turn counter for the spawn-phase schedule
+CONTESTED = set()  # houses where we captured over enemy units — their capture force
+# sits there and swarm opponents (AdrienGI) hunt exactly these stacks with ATTACK
+LAST_OWNER = {}  # corner-tuple -> owner last turn; detects enemy just-neutralized triangles
 
 while True:
     my_score, opp_score = [int(i) for i in input().split()]
@@ -108,7 +111,28 @@ while True:
     used_tris = set()
     cmds = []
 
+    # Threat map (needed by the ATTACK section below).
+    opp_tris = [t[:3] for t in tris if t[3] == 1 and all(opp.get(c, 0) > 0 for c in t[:3])]
+    attack_danger = set()
+    for ot in opp_tris:
+        for c in ot:
+            attack_danger.update(adj.get(c, ()))
+
+    def risky(h):
+        """Parking danger: dead-ends and houses fully surrounded by the opponent
+        get swept (surround kill) or ATTACKed."""
+        neighs = list(adj.get(h, ()))
+        if not neighs:
+            return 2
+        opp_nb = sum(1 for m in neighs if opp.get(m, 0) > 0)
+        if opp_nb == len(neighs):
+            return 2
+        return 1 if opp_nb > 0 else 0
+
     # 1. ATTACK only when it's strictly profitable (kills >= 4, or kills >= 3 when army >= 18)
+    # SAFETY: attack only from a triangle whose corners are NOT in the enemy's attack
+    # blast radius — simultaneous attacks resolve against each other and our corner
+    # units can die first, silently voiding our ATTACK (ChuOkupai f44).
     for t in sorted(
         usable,
         key=lambda tr: max((opp.get(n, 0) for c in tr[:3] for n in adj.get(c, ())), default=0),
@@ -124,15 +148,21 @@ while True:
                     best_kill = k
                     best_n = n
         if best_n is not None and (
-            best_kill >= 4
-            or (best_kill >= 3 and army >= 18 and len(usable) - len(used_tris) >= 2)
-            or (best_kill >= 2 and army >= 28 and len(usable) - len(used_tris) >= 3)
+            best_kill >= 5
+            or (best_kill >= 4 and army >= 18 and len(usable) - len(used_tris) >= 2)
+            or (best_kill >= 3 and army >= 28 and len(usable) - len(used_tris) >= 3)
         ) and opp.get(best_n, 0) > 0:
-            cmds.append(f"ATTACK {corners[0]} {corners[1]} {corners[2]} {best_n}")
-            used_tris.add(corners)
-            opp[best_n] = 0
-            for c in corners:
-                my[c] = max(0, my[c] - 1)
+            # Skip if our attacking triangle's corners sit in the enemy attack blast
+            # radius OR near enemy units at all — simultaneous attacks can kill our
+            # corner units first and our ATTACK silently fails (wasted triangle +
+            # wasted turn, ChuOkupai f40/f44). Be conservative: attacks only when
+            # clearly safe and clearly profitable.
+            if all(c not in attack_danger for c in corners) and all(opp.get(c, 0) == 0 for c in corners):
+                cmds.append(f"ATTACK {corners[0]} {corners[1]} {corners[2]} {best_n}")
+                used_tris.add(corners)
+                opp[best_n] = 0
+                for c in corners:
+                    my[c] = max(0, my[c] - 1)
 
     # 2. Staggered engine cycles: split usable owned triangles into a SPAWN group and a HOLD group.
     # Spawning neutralizes a triangle (owner -> None), so spawning on ALL of them at once kills our
@@ -175,10 +205,8 @@ while True:
     cands = [t for t in tris if t[3] != 0 and t[4]]
 
     # PHASE LOCK (light): units on corners of owned triangles whose spawn turn is
-    # NEXT (phase 2) hold their position — max 1 per corner, and never lock more
-    # than half the army (the swarm needs bodies). Phase 0 spawns right now (their
-    # corners are spent this turn anyway) and phase 1 triangles are in their vacate
-    # turn — those units stay FREE.
+    # NEXT (phase 2) hold their position — max 1 per house total (hub houses shared
+    # by many triangles must not accumulate one locked unit PER TRIANGLE).
     locked_total = 0
     lock_budget = max(0, army // 2)
     for t in sorted(owned, key=lambda x: -tri_hub[x[:3]][0]):
@@ -190,14 +218,16 @@ while True:
         for c in cs:
             if locked_total >= lock_budget:
                 break
-            keep = 1 + opp.get(c, 0) if opp.get(c, 0) > 0 else 1
-            lock = min(my.get(c, 0), keep)
-            if lock > 0:
-                take = min(lock, avail.get(c, 0), lock_budget - locked_total)
-                if take > 0:
-                    avail[c] = max(0, avail.get(c, 0) - take)
-                    locked_end[c] += take
-                    locked_total += take
+            # house-level cap: total units committed to this house (sitting +
+            # spawning + en route) must stay <= 2, and lock at most 1 here
+            committed = my.get(c, 0) + spawn_houses.get(c, 0) + en_route.get(c, 0)
+            if committed >= 2:
+                continue
+            take = min(1, avail.get(c, 0), lock_budget - locked_total)
+            if take > 0:
+                avail[c] = max(0, avail.get(c, 0) - take)
+                locked_end[c] += take
+                locked_total += take
 
     avail_total = sum(avail.values())
     must_vacate = {c for t in tris if t[3] != 0 and not t[4] for c in t[:3]} | {
@@ -205,22 +235,8 @@ while True:
     }
     resettable_tris = [t[:3] for t in tris if (t[3] != 0 and not t[4]) or (t[:3] in to_spawn)]
 
-    opp_tris = [t[:3] for t in tris if t[3] == 1 and all(opp.get(c, 0) > 0 for c in t[:3])]
-    attack_danger = set()
-    for ot in opp_tris:
-        for c in ot:
-            attack_danger.update(adj.get(c, ()))
-
-    def risky(h):
-        """Parking danger: dead-ends and houses fully surrounded by the opponent
-        get swept (surround kill) or ATTACKed."""
-        neighs = list(adj.get(h, ()))
-        if not neighs:
-            return 2
-        opp_nb = sum(1 for m in neighs if opp.get(m, 0) > 0)
-        if opp_nb == len(neighs):
-            return 2
-        return 1 if opp_nb > 0 else 0
+    owner_now = {t[:3]: t[3] for t in tris}
+    me_cap_now = {t[:3]: t[4] for t in tris}
 
     opp_reach1 = {
         h: opp.get(h, 0) + sum(opp.get(n, 0) for n in adj.get(h, ()) if n not in home_side or opp.get(n, 0) > 0)
@@ -232,16 +248,34 @@ while True:
     # excess piles up into one enemy ATTACK target (czuk killed 6 units this way).
     en_route = {}
 
-    # TRAP RISK: if we stack units on corner H of triangle t, the opponent can
-    # ATTACK H next turn from any of THEIR ready triangles that (a) can reach H
-    # (has a corner adjacent to H) and (b) we do NOT break by capturing t
-    # (shares no corner with t). Deprioritize such captures — the stack dies.
+    # TRAP RISK v2: if we stack units on corner H of triangle t, the opponent can
+    # ATTACK H next turn from any of THEIR triangles that (a) can reach H (a corner
+    # adjacent to H) and (b) we do NOT break by capturing t (shares no corner with t).
+    # v2: also counts POTENTIALLY-ready triangles — the enemy can staff all 3 corners
+    # THIS turn (their units within 1 step of every corner), so the triangle becomes
+    # ready in the very round we capture (AdrienGI made 3 ready triangles per round
+    # and hunted our stacks with 6 attacks). Uncontested corners (opp == 0) are safe.
+    opp_potential = []
+    for t in tris:
+        if t[3] == 1:
+            cs = t[:3]
+            # enemy can staff every corner within 1 step (units there or adjacent)
+            if all(
+                opp.get(c, 0) > 0
+                or any(opp.get(u, 0) > 0 and dist(u, c) == 1 for u in houses)
+                for c in cs
+            ):
+                opp_potential.append(cs)
+
     def trap_risk(t):
         cs = set(t[:3])
         for H in t[:3]:
-            if H not in attack_danger:
+            # uncontested corner: nothing to attack there — no stack exposure
+            if opp.get(H, 0) == 0 and not any(
+                opp.get(u, 0) > 0 and dist(u, H) == 1 for u in houses
+            ):
                 continue
-            for ot in opp_tris:
+            for ot in opp_tris + opp_potential:
                 ocs = set(ot)
                 if ocs & cs:
                     continue  # capturing t breaks ot — no trap
@@ -396,9 +430,17 @@ while True:
         spawned_corners = set()
         n_imm = len(imm_cands)
         subsets_to_try = []
-        for r in range(min(3, n_imm), 0, -1):
+        # BURST: try up to 4-subsets when the candidate list is small — joint
+        # multi-capture in one turn is how AdrienGI took 7 triangles at once.
+        # With shared corners a burst costs only the non-shared corners.
+        max_r = min(4, n_imm) if n_imm <= 6 else min(3, n_imm)
+        for r in range(max_r, 0, -1):
             subsets_to_try.extend(itertools.combinations(imm_cands, r))
+        tried = 0
         for sub in subsets_to_try:
+            tried += 1
+            if tried > 200:
+                break
             res = can_satisfy(sub, avail, locked_end, spawned_corners)
             if res is not None:
                 sp_choices, moves, total_add, resets, reach_sc = res
@@ -426,6 +468,8 @@ while True:
             avail_total -= take
             locked_end[dst] = locked_end.get(dst, 0) + take
             en_route[dst] = en_route.get(dst, 0) + take
+            if opp.get(dst, 0) > 0 and my.get(dst, 0) + take > opp.get(dst, 0):
+                CONTESTED.add(dst)
             if src != dst:
                 cmds.append(f"MOVE {src} {dst} {take}")
     else:
@@ -496,6 +540,41 @@ while True:
                     else:
                         locked_end[c] = locked_end.get(c, 0) + 1
 
+    # 4B1. PUNISH: enemy just neutralized a triangle (their ATTACK or their own
+    # SPAWN) — it is now neutral with WEAKENED/vacating corners. Capturing it
+    # immediately is cheap and punishes their attack (AdrienGI attacked 13x/game
+    # for free — this makes every attack cost them a triangle).
+    # Runs BEFORE FOCUS: punishing the attacker beats chasing our own plan.
+    punish_tris = [
+        cs
+        for cs, own in LAST_OWNER.items()
+        if own == 1 and owner_now.get(cs, -1) != 1 and me_cap_now.get(cs, False)
+    ]
+    for cs in punish_tris:
+        for c in cs:
+            deficit = (opp.get(c, 0) + 1) - my.get(c, 0) - locked_end.get(c, 0) - en_route.get(c, 0)
+            while deficit > 0 and avail_total > 0:
+                srcs = [
+                    u
+                    for u in houses
+                    if avail.get(u, 0) > 0
+                    and u != c
+                    and first_step(u, c) not in forbidden_end
+                ]
+                if not srcs:
+                    break
+                srcs.sort(key=lambda u: (dist(u, c), risky(u), -avail[u]))
+                u = srcs[0]
+                take = min(avail[u], deficit)
+                avail[u] -= take
+                avail_total -= take
+                deficit -= take
+                en_route[c] = en_route.get(c, 0) + take
+                step = first_step(u, c)
+                locked_end[step] = locked_end.get(step, 0) + 1
+                if u != c:
+                    cmds.append(f"MOVE {u} {c} {take}")
+
     # 4B2. FOCUS commitment: serve the sticky target's deficits BEFORE other
     # captures so units converge instead of wandering (loick/Arnaud commit
     # instantly; our turn-by-turn re-targeting lost the early game).
@@ -557,8 +636,14 @@ while True:
         # ones entirely — walking into an unbroken enemy ATTACK loses the whole stack.
         non_trap_exists = any(not trap_risk(t) for t in cands)
         # End-of-turn position estimate: units stay put or land on first_step of their move.
+        # MUST include en_route (units committed by earlier assignments this turn) —
+        # otherwise two triangles sharing a hub each "see" an empty hub and both send
+        # units there → cross-triangle pile (the 10-unit ATTACK kill vs AdrienGI).
         # Prevents unknowingly parking a pile on a house the opponent can ATTACK next round.
-        parked = {h: my.get(h, 0) + spawn_houses.get(h, 0) for h in houses}
+        parked = {
+            h: my.get(h, 0) + spawn_houses.get(h, 0) + en_route.get(h, 0)
+            for h in houses
+        }
         for t in cands:
             corners = t[:3]
             if stay_home and best_imm is not None and not all(c in home_side for c in corners):
@@ -604,10 +689,15 @@ while True:
                     step = first_step(h, target)
                     if d > 1 and step in forbidden_end:
                         continue
-                    # Do not route units THROUGH a house that already holds/parks
-                    # 3+ of ours — piles die to a single ATTACK or surround (czuk).
-                    # Arriving at the target corner itself (step == target) is allowed.
-                    if d > 1 and step != target and temp_parked.get(step, 0) >= 3:
+                    # GLOBAL cap 2 units per house: swarm opponents (AdrienGI)
+                    # attack EVERY stack they can reach, 2-6 units per attack,
+                    # every turn. A 3-6 stack is a gift to them; a 2-stack loses
+                    # at most 2. Captures of contested corners complete over two
+                    # turns instead of one — slower but the army survives.
+                    if d > 1 and temp_parked.get(step, 0) >= 2 and step != target:
+                        continue
+                    if temp_parked.get(target, 0) >= 2 and opp.get(target, 0) > 0:
+                        # contested corner already saturated this turn — wait
                         continue
                     take = cnt if cnt < rem else rem
                     temp_avail[h] = cnt - take
@@ -631,9 +721,14 @@ while True:
             adj_t, deg_sum = tri_hub[corners]
             shared_ready = sum(1 for c in corners if locked_end.get(c, 0) > opp.get(c, 0))
             is_home = 0 if all(c in home_side for c in corners) else 1
+            # Contested captures (any corner with enemy units) build stacks the
+            # swarm opponents hunt with ATTACK (AdrienGI: 25 of our units killed
+            # this way). Prefer uncontested captures when available.
+            contested = 1 if any(opp.get(c, 0) > 0 for c in corners) else 0
             score = (
                 0 if max_d <= 1 else max_d,
                 trap_risk(t),
+                contested,
                 is_home,
                 total_req if max_d <= 1 else 0,
                 -shared_ready if max_d <= 1 else 0,
@@ -659,6 +754,11 @@ while True:
                 avail_total += take
                 continue
             locked_end[step] = locked_end.get(step, 0) + take
+            # Capture over enemy units → this house becomes a hunt target for
+            # swarm opponents (AdrienGI attacks our capture forces turn after
+            # turn). Mark it: next turn the excess must dissolve.
+            if d <= 1 and opp.get(dst, 0) > 0 and my.get(dst, 0) + take > opp.get(dst, 0):
+                CONTESTED.add(dst)
             if src != dst:
                 cmds.append(f"MOVE {src} {dst} {take}")
 
@@ -767,8 +867,23 @@ while True:
         neighs = list(adj.get(src, ()))
         excess = 0
         if src in attack_danger:
-            sitting = my.get(src, 0)
-            excess = max(0, sitting - 2)
+            excess = max(excess, my.get(src, 0) - 2)
+        if risky(src) >= 2:
+            # surround risk: all neighbours (nearly) opponent-owned — keep 1, flee
+            excess = max(excess, my.get(src, 0) - 1)
+        if src in CONTESTED:
+            # Our capture force sits on a house we took over enemy units — swarm
+            # opponents (AdrienGI) hunt exactly these stacks with ATTACK next turn.
+            # Dissolve: keep 2, scatter the rest.
+            excess = max(excess, my.get(src, 0) - 2)
+        # PREDICTIVE surround: if the opponent could out-stock EVERY neighbour next
+        # turn (their reach-1 army beats our presence), this house becomes a kill
+        # pocket — flee now, before the encirclement closes (Rikus/ChuOkupai kill 4-9
+        # units per turn this way).
+        if neighs and all(
+            opp_reach1.get(m, 0) > my.get(m, 0) for m in neighs
+        ):
+            excess = max(excess, my.get(src, 0) - 1)
         must_move = (
             src in must_vacate
             or src not in home_side
@@ -811,4 +926,7 @@ while True:
                 excess -= 1
 
     ui = f"v={army} t={len(owned)}"
+    # Persist owner state for next turn's punish detection
+    for t in tris:
+        LAST_OWNER[t[:3]] = t[3]
     print(("MSG " + ui + ";" + ";".join(cmds)) if cmds else ("MSG " + ui), flush=True)

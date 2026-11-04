@@ -102,6 +102,8 @@ Fázy v ťahu, v tomto poradí:
 |---|---|---|
 | `default` (Wood) | = level-2 boss: 3 jednotky na najbližší tri, 1 spawn/ťah, zvyšok random walk; ATTACK až pri > 10 jednotkách | Aktuálny bot ho bije 100 % (win rate, 15+ hier) |
 | **czuk** (rank 53, `agent_id=6845057`) | Rovnaký snowball ako Arnaud: 2–8 spawnov/ťah, OUR pile-ups trestal ATTACKom (6 mŕtvych na f52) a surroundom. Po opravách (2026-11-04): ATTACK katastrofa zmizla, surround ≤ 4, ale spawn tempo 1/ťah vs ich 2–8/ťah rozhodne koncovku. LOSS −1:73 (game 916451418). | Rovnaké ako Arnaud: rýchlejší rast počtu tri |
+| **AdrienGI** (rank 320, `agent_id=6841548`) | **Porazil nás napriek nižšiemu ranku!** Pattern: 7-capture burst (f33), potom **systematický lov našich stackov** — 6 ATTACKov (4+5+3+5+3+5 = 25 mŕtvych). My sme viedli (f32: t=3, v=16 vs ich t=1!) — ich burst + lov nás zlomil. LOSS −1:68 (games 916487228/916487642, seed 8557136380578188000). | Stackovanie capture sily na contested roh = inherentne zraniteľné — pozri ČASOVÁ OS nižšie |
+| **ChuOkupai** (rank 18, `agent_id=6844913`) | **Najsilnejší testovaný súper**. Otvorenie: my sme boli V PREDOSTI (T3: 3 tri vs ich 2, T12: t=4 v=7, sp=3)! Zlom f45: oni spawnuli **8 jednotiek/ťah** (8+ usable tri) a prebrali vedenie. Naše slabiny: (a) ATTACK na f44 zlyhal ticho — simultánne útoky: ich útok môže zabiť naše rohové jednotky v rovnakej fáze, skôr než sa náš vykoná → ATTACK je teraz konzervatívny (kill ≥ 5 / bezpečné tri / rohy bez súperov); (b) pile-up: attacked 5 + surrounded 3+4 → v=15→5 → kolaps. LOSS −1:76 (game 916484382, seed −6881233887446812000). Straty na pile-upoch: 5+5+3+3+2 = 18 jednotiek. | Otvorenie je parity aj s rank 18! Zostáva: spawn tempo (oni 8/ťah) + anti-pileup |
 | **Rikus** (rank 50, `agent_id=6843770`) | Rovnaká trieda ako loick: 3–8 spawnov/ťah, 15–38 MOVEov/ťah, surround-taktika (obkľúči naše pozície masou). Naše opening je parity (T1: 2 tri!), ale ich armáda rastie rýchlejšie → surround 3–4 jednotiek/ťah od T15. LOSS −1:70 (game 916480092, seed 8799062500137730000). | Rovnaký koreň: capture tempo → owned count → spawn tempo → armáda |
 | **[CG]loick** (rank 30, `agent_id=6841719`) | Najrýchlejší známy swarm: **13–31 MOVEov/ťah** (hýbe VŠETKÝMI jednotkami), 4–7 capture/ťah v strede hry, 5–8 spawnov/ťah. Skoro žiadna garda — jednotky neustále captureujú. Naše porovnanie: mv 2–8, sp 1–2. LOSS −1:59 (game 916454805, seed 6661582836916759000). | Doktrína „swarm nad garrisson“ — naše jednotky musia neustále captureovať, nie sedieť na rohoch |
 | **Arnaud.Net** (rank 22, `agent_id=6844116`) | **Mass-spawn 5–16/ťah**, recapture cyklus, ATTACK na naše stacky. Do T20 má 2–3× našu armádu. | Ešte neporazený. Treba: rýchlejší rast počtu tri (viac engine) + rozptýlenie jednotiek (anti-ATTACK) + možno 1:1 kópia ich stratégie |
@@ -137,6 +139,36 @@ Fázy v ťahu, v tomto poradí:
 (1. capture otvorí cluster, ďalšie stoja len 1–2 jednotky za ne-zdieľaný roh). Missions experiment
 (`bot_missions_backup.py`) mal tú myšlienku, ale online zamrzal — bug nezistený.
 
+### ČASOVÁ OS anti-pileup (AdrienGI analýza — prečo dissolve nestačí)
+
+```
+Round N:   naša capture sila (3-4 J) prichádza na contested roh → capture OK
+           (v TOM ISTOM kole súperove MOVEy môžu urobiť iný tri ready)
+Round N+1 fáza 0: súperov ATTACK zabije náš stack — SKÔR než sa náš "dissolve"
+           pass (fáza MOVE round N+1) vykoná!
+```
+
+→ Dissolve po capture je **vždy neskoro**. Jediné ochrany:
+1. **Minimalizovať stack už pri capture** — posielať presne `opp+1`, jednotky z rôznych
+   smerov (via-count per medzidom), nie cez jeden hub.
+2. **trap_risk musí predvídať NOVÉ ready tri** — súper môže urobiť tri ready TOMTO kole
+   (their moves) vedľa nášho capture cieľa. Predikcia: tri, kde súper má jednotky pri
+   všetkých 3 rohoch v dosahu 1 kroku = „ready next turn" → počítať do trap_risk.
+3. **Vhodnejšie je capture NE-kontestovaného rohu** (opp=0) — žiadny stack pred súperom.
+
+### AdrienGI lovný mechanizmus (2026-11-04, games 916487228–916492529)
+
+AdrienGI zaútočil **13-krát za hru** (2–10 jednotiek na útok, ~39 strát) — každý náš stack
+v dosahu ich tri dostal útok. Naše opravy znížili max zásah z 10 na 5, ale attrition war
+sa prehráva: ich 39 kills vs našich ~15 spawnov.
+
+**Punish mechanizmus (IMPLEMENTOVANÉ 2026-11-04)**: `LAST_OWNER` tracking + `punish_tris`
+(4B1, priorita pred FOCUS) — capture tri, ktoré súper práve neutralizoval útokom/spawnom.
+Výsledok vs AdrienGI: capture ich tri 1–3/ťah (funguje), ALE ich swarm rebuild je rýchlejší
+a náš v=18 padol na 9 (f56: 9-unit loss combo) — attrition war sa stále prehráva.
+Ďalší level: ich útoky tiež ničia naše ENGINE rohy → po ich útoku musí refill okamžite
+obnoviť engine (unlimited reach aj pri veľkom počte engineov).
+
 Hrať proti konkrétnemu hráčovi: `./cg replay --seed <S> --opponent <agent_id> --ide`
 (legy: `GET /challenges/fall-challenge-2026/opponents` — nick → `agent_id`).
 
@@ -146,14 +178,15 @@ Hrať proti konkrétnemu hráčovi: `./cg replay --seed <S> --opponent <agent_id
    Náš temp je limitovaný počtom vlastnených trojuholníkov × stagger (1 spawn / 3 ťahy / tri).
    Cesta hore: **rýchlejšia expanzia** (viac capture/ťah). Missions experiment mal správnu myšlienku,
    ale online zamrzal — pozri `bot_missions_backup.py`, bug nezistený (lokálny sim vyzeral zdravo!).
-2. **ANTI-PILEUP (známy bug, 2 skipnuté testy v `tests/test_game_sim.py`)**: `SPAWN` landing +
-   **pass-through parking** (jednotka poslaná na vzdialený cieľ sa 1. krokom zastaví na medzidome —
-   ak je to roh tri v dosahu súperovho ATTACKu, nevedomo tam naskladnáme 4–9 jednotiek a jeden
-   súperov ATTACK ich zmaže). Opravené čiastočne: spawn corner uniqueness (per ťah), `en_route`
-   accounting, pass-through block (parked ≥ 3 len pre pass-through, nie pre capture príchod),
-   `trap_risk` deprioritizácia, emptier-corner spawn preference, kotvy max 1/roh len na hold_group.
-   Stále nepostačuje — potrebné **path-aware end-position planning** (plánovať, kde
-   jednotky really skončia: `first_step(src,dst)` pre každý move a počítať to do `parked`).
+2. **ANTI-PILEUP (známy bug, 2 skipnuté testy v `tests/test_game_sim.py`)** — HLAVNÁ PRIČINA PREHIER
+   s top Silver: `SPAWN` landing + **pass-through parking** + capture konvergencia vytvoria stack
+   4–9 jednotiek na jednom dome → jeden súperov ATTACK/surround ich zmaže (ChuOkupai: 5+5+3+3+2 = 18
+   straty na jednej hre!). Opravené čiastočne: spawn corner uniqueness, `en_route` accounting,
+   pass-through block, `trap_risk`, predictive surround escape, kotvy max 1/roh.
+   **Nutné riešenie**: end-position-aware planning — priraďovanie jednotiek musí plánovať KDE
+   really skončia (`first_step(src,dst)` pre každý move) a cap-núť `parked[h] ≤ 2` priamo
+   v priraďovacom algoritme (nie ako afterthought spread-pass, ktorý nemôže recall-núť
+   už commitnuté jednotky).
 3. **Capture tempo vs swarm súperov**: loick robí 4–7 capture/ťah v strede hry, my 1–2. Treba
    **paralelné multi-capture plánovanie** so zdieľanými rohmi (missions experiment mal správnu
    myšlienku, ale online zamrzal — bug nezistený, `bot_missions_backup.py`).
