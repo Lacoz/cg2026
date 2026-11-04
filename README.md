@@ -17,9 +17,49 @@ předlžovania kontextu — čo funguje, čo nie a prečo.
 | `scoring.yaml` | Opponent `default` ×5, brány: win_rate ≥ 0.2, median ≥ 3, crash ≤ 0.5. Boss sekcia zapoznámkovaná (NO_BOSS v Wood). |
 | `tmp_seed_*.txt` | Full game_options seedov na lokálny replay (466 = Arnaud.Net, 328 = M_C, 436/−7474/−8423/194). |
 
-**Posledná validácia `bot.py` (2026-11-04, po czuk opravách)**: unit testy 10 OK (2 skip = známy bug) ·
-online `./cg test --games 2` → **2/2 WIN** (134:−1, **3459:11**), všetky brány prešli ·
-opravy: spawn-corner uniqueness, `en_route` accounting, `trap_risk`, pass-through parking block.
+**Posledná validácia `bot.py` (2026-11-04, 11:30)**: unit testy 10 OK (2 skip = známy bug) ·
+online `./cg test --games 2` → **2/2 WIN**, všetky brány prešli ·
+opravy: spawn-corner uniqueness, `en_route` accounting, `trap_risk`, pass-through parking block,
+FOCUS + LAST_FOCUS, fázový rozvrh, swarm doktrína, spawn tempo `owned//3`.
+
+## Benchmark (2026-11-04, 11:30)
+
+### Lokálne solo (50 ťahov; formát skóre/tri/jednotky)
+
+| seed | T10 | T20 | T30 | T50 |
+|---|---|---|---|---|
+| 403 | 24/3/19 | 89/11/36 | 199/11/36 | 438/12/36 |
+| 194 | 16/4/8 | 71/7/32 | 234/19/36 | 614/19/36 |
+| 436 | 28/7/11 | 89/8/24 | 167/11/36 | 387/11/36 |
+| loick | 10/0/11 | 41/4/25 | 142/14/36 | 422/14/36 |
+| czuk | 19/2/16 | 67/8/36 | 203/14/36 | 483/14/36 |
+| rikus | 43/7/15 | 133/16/36 | 339/21/36 | 759/21/36 |
+| M_C | 16/1/18 | 97/12/36 | 217/12/36 | 457/12/36 |
+| Arnaud | 20/2/21 | 176/20/36 | 385/21/36 | 805/21/36 |
+| ctuanle | 11/2/12 | 200/39/36 | 590/39/36 | 1370/39/36 |
+
+### Online rematče na rovnakých seedoch (aktuálny bot vs historické výsledky)
+
+| Súper (rank) | Historicky | Teraz | Záver |
+|---|---|---|---|
+| `default` | 100 % win | **100 %** (2092:16, 350:−1) | dominancia |
+| ctuanle (494) | WIN 4806:26 | **WIN 234:−1** | ✅ výhra |
+| M_C (56) | LOSS −1:1522 → −1:47 | **LOSS −1:47** | gap sa zúžil, stále prehra |
+| Arnaud.Net (32) | LOSS −1:71…123 | **LOSS −1:92** | prehra |
+| czuk (nový submit, id 6845662) | LOSS −1:73 | **LOSS −1:118** | súper sa tiež zlepšil (nový bot!) |
+| [CG]loick (38) | LOSS −1:46…67 | **LOSS −1:52** | prehra, ich skóre stabilné |
+| Rikus (49) | LOSS −1:66…76 | **LOSS −1:74** | prehra |
+
+Pozn.: agent_id súperov sa mení s každým ich submitom — pred rematčom vždy refresh
+`GET /challenges/fall-challenge-2026/opponents` (inak 400 INVALID_OPPONENT).
+
+### Lokálny boss-port benchmark (40 ťahov vs level-2 Boss port)
+
+WIN na 8/9 seedov (Arnaud 500:5, rikus 384:27, 403 372:6…). **Výnimka: ctuanle seed — lokálne 0:2 LOSS,
+ale ONLINE VÝHRA 234:−1** → sim má odchylku na tejto mape (skúmať: early stall v sim, geometria).
+
+**Záver**: proti `default`-úrovni dominujeme všade. Gap je len proti Silver top-50 swarm botom
+(capture tempo 4–7/ťah vs naše 1–2) — riešenie v §Otvorené problémy.
 
 ---
 
@@ -62,17 +102,18 @@ Fázy v ťahu, v tomto poradí:
 |---|---|---|
 | `default` (Wood) | = level-2 boss: 3 jednotky na najbližší tri, 1 spawn/ťah, zvyšok random walk; ATTACK až pri > 10 jednotkách | Aktuálny bot ho bije 100 % (win rate, 15+ hier) |
 | **czuk** (rank 53, `agent_id=6845057`) | Rovnaký snowball ako Arnaud: 2–8 spawnov/ťah, OUR pile-ups trestal ATTACKom (6 mŕtvych na f52) a surroundom. Po opravách (2026-11-04): ATTACK katastrofa zmizla, surround ≤ 4, ale spawn tempo 1/ťah vs ich 2–8/ťah rozhodne koncovku. LOSS −1:73 (game 916451418). | Rovnaké ako Arnaud: rýchlejší rast počtu tri |
+| **Rikus** (rank 50, `agent_id=6843770`) | Rovnaká trieda ako loick: 3–8 spawnov/ťah, 15–38 MOVEov/ťah, surround-taktika (obkľúči naše pozície masou). Naše opening je parity (T1: 2 tri!), ale ich armáda rastie rýchlejšie → surround 3–4 jednotiek/ťah od T15. LOSS −1:70 (game 916480092, seed 8799062500137730000). | Rovnaký koreň: capture tempo → owned count → spawn tempo → armáda |
 | **[CG]loick** (rank 30, `agent_id=6841719`) | Najrýchlejší známy swarm: **13–31 MOVEov/ťah** (hýbe VŠETKÝMI jednotkami), 4–7 capture/ťah v strede hry, 5–8 spawnov/ťah. Skoro žiadna garda — jednotky neustále captureujú. Naše porovnanie: mv 2–8, sp 1–2. LOSS −1:59 (game 916454805, seed 6661582836916759000). | Doktrína „swarm nad garrisson“ — naše jednotky musia neustále captureovať, nie sedieť na rohoch |
 | **Arnaud.Net** (rank 22, `agent_id=6844116`) | **Mass-spawn 5–16/ťah**, recapture cyklus, ATTACK na naše stacky. Do T20 má 2–3× našu armádu. | Ešte neporazený. Treba: rýchlejší rast počtu tri (viac engine) + rozptýlenie jednotiek (anti-ATTACK) + možno 1:1 kópia ich stratégie |
 | **M_C** (rank ~50, `agent_id=6843883`) | Podobný snowball, menej presný | Remíza do stredu hry, prehráva koncovku |
 | `ctuanle` (rank 483, `agent_id=6843670`) | Slabý — bieme ho (4806:26) | — |
 
-### Naučené zo súperov (2026-11-04, [CG]loick analýza)
+### Naučené zo súperov (2026-11-04, [CG]loick + Rikus analýza)
 
 1. **Garrisson je drahý**: stará doktrína rezervovala `opp+1` jednotiek na KAŽDOM rohu KAŽDého
-   own tri — pri 8 tri to parkovalo ~24 jednotiek, kým loick hýbal 20+. Oprava: kotvy len na
-   `hold_group` (spawn engine) max 1/roh. Skóre prichádza z OWNERSHIPU, nie z garnizonov —
-   trojuholník ostáva náš, kým niekto neprevrátí roh.
+   own tri — pri 8 tri to parkovalo ~24 jednotiek, kým loick hýbal 20+. Oprava: **fázový rozvrh**
+   (`phase_of(cs) = (TURN_NO + sum(cs)) % 3`) — spawn len na phase-0 tri, lock max 1/roh s budgetom
+   `army//2`, ostatok armády swarmuje. Solo skóre @T29: rikus-seed 307 (t=20!), czuk 204, loick 128.
 2. **Spawn tempo škálovať s owned countom**: `n_spawn = owned // 3` (3-ťahový cyklus spawn→vacate→
    recapture). Testované aj `//2` — na loick/czuk mapách HORŠIE (67→56, 78→71), lebo neutralizácia
    predbehne capture tempo. `//3` je sweet spot.
@@ -81,7 +122,20 @@ Fázy v ťahu, v tomto poradí:
    nezískame (alebo 14 ťahov). `LAST_FOCUS` chráni cluster kotvu pred spawnom.
 4. **Pass-through parking**: jednotka na vzdialený cieľ sa 1. krokom BFS zastaví na medzidome —
    ak je to roh v dosahu súperovho ATTACKu, nevedomo naskladnáme 4–9 jednotiek = jeden ATTACK
-   ich zmaže (czuk f52: 6 mŕtvych). Blokované cez `parked` sledovanie,ale stále nedokonalé.
+   ich zmaže (czuk f52: 6 mŕtvych). Blokované cez `parked` sledovanie.
+5. **Spawn engine nikdy nespí**: ak žiaden phase-0 tri nie je usable, spawnuj najlepší usable
+   aj mimo fázy — inak motor stojí 2 ťahy (Rikus f50–f62: sp=0 tri ťahy = smrť).
+6. **Pre-positioning počas vacate**: jednotky opúšťajúce tri parkujú susedne k jeho ostatným
+   rohom (`park_bonus`) — v staffing fáze sa vrátia 1 krokom a cyklus neprestáva.
+7. **Hard trap avoidance**: ak existuje capture bez trap-rizika, trap-riskové sa preskočia
+   úplne (nie len deprioritizácia) — stack v dosahu živého súperovho ATTACKu = strata stacku.
+
+### Zvyšná gapa vs top Silver (Rikus/loick/Arnaud)
+
+**Armádna gapa v strede hry** (oni 3× naša armáda → surround-taktika). Koreň: ich capture tempo
+4–7/ťah vs naše 1–2. Riešenie vyžaduje **paralelné multi-capture plánovanie so zdieľanými rohmi**
+(1. capture otvorí cluster, ďalšie stoja len 1–2 jednotky za ne-zdieľaný roh). Missions experiment
+(`bot_missions_backup.py`) mal tú myšlienku, ale online zamrzal — bug nezistený.
 
 Hrať proti konkrétnemu hráčovi: `./cg replay --seed <S> --opponent <agent_id> --ide`
 (legy: `GET /challenges/fall-challenge-2026/opponents` — nick → `agent_id`).

@@ -34,6 +34,7 @@ home_side = set()
 FOCUS = None
 FOCUS_AGE = 0
 LAST_FOCUS = None  # recently captured focus — keep its cluster intact for chaining
+TURN_NO = 0  # game turn counter for the spawn-phase schedule
 
 while True:
     my_score, opp_score = [int(i) for i in input().split()]
@@ -92,6 +93,16 @@ while True:
 
     army = sum(my.values())
     opp_army = sum(opp.values())
+    TURN_NO += 1
+
+    # PHASE SCHEDULE: each triangle cycles spawn -> vacate -> capture in 3 turns.
+    # The phases are staggered deterministically (hash of corners + turn), so at any
+    # moment only ~1/3 of our triangles need their corners staffed and the rest of
+    # the army is FREE to swarm captures. This is what [CG]loick/Rikus do and we
+    # didn't: our old anchors parked 2/3 of the army doing nothing.
+    def phase_of(cs):
+        return (TURN_NO + sum(cs)) % 3
+
     owned = [t for t in tris if t[3] == 0]
     usable = [t for t in owned if all(my.get(c, 0) > 0 for c in t[:3])]
     used_tris = set()
@@ -133,7 +144,12 @@ while True:
     to_spawn = []
     hold_group = []
     if army < max_army:
+        # PHASE SCHEDULE: prefer phase-0 triangles (their staffing cycle aligned),
+        # but the spawn engine NEVER sleeps — if no phase-0 triangle is usable,
+        # spawn on the best usable triangle anyway (army growth beats schedule).
         spawnable = [t for t in usable if t[:3] not in used_tris]
+        in_phase = [t for t in spawnable if phase_of(t[:3]) == 0]
+        ordered = in_phase + [t for t in spawnable if t not in in_phase]
         # Spawn WHERE it hurts least: never on the fresh capture that anchors the
         # cluster chain. Rank spawnable by (shared corners with FOCUS asc, hub desc)
         # so high-connectivity triangles stay owned and keep chaining captures.
@@ -143,16 +159,9 @@ while True:
             shared = len(set(t[:3]) & focus_set)
             return (shared, -tri_hub[t[:3]][0], -tri_hub[t[:3]][1])
 
-        spawnable.sort(key=spawn_rank)
-        # Spawn rate must match the 3-turn spawn cycle: each owned triangle can
-        # spawn once per 3 turns (spawn -> vacate -> recapture). Spawning on more
-        # just neutralizes our scoring base; spawning on less wastes growth.
-        # Scale: spawn on ~owned/3 triangles per turn, at least 1 while growing.
-        n_spawn = max(1, min(len(spawnable) - 1 if len(spawnable) > 1 else 1, max(1, len(owned) // 3)))
-        if len(spawnable) <= 1:
-            n_spawn = len(spawnable)
-        hold_group = [t[:3] for t in spawnable[: len(spawnable) - n_spawn]]
-        spawn_candidates = spawnable[len(spawnable) - n_spawn :]
+        ordered.sort(key=spawn_rank)
+        hold_group = [t[:3] for t in ordered]
+        spawn_candidates = ordered
         for t in spawn_candidates:
             if army + len(to_spawn) >= max_army:
                 break
@@ -165,22 +174,30 @@ while True:
     spawn_houses = {h: 0 for h in houses}
     cands = [t for t in tris if t[3] != 0 and t[4]]
 
-    # Keep anchors ONLY on spawn-engine triangles (hold_group), max 1 per corner.
-    # The old doctrine reserved opp+1 units on EVERY corner of EVERY owned triangle —
-    # with 8 triangles that parks up to 24 units doing nothing while the opponent
-    # swarms 20+ moves per turn ([CG]loick comparison). Score comes from OWNERSHIP,
-    # not garrison: a triangle stays ours until someone flips a corner, and the
-    # army is better spent capturing the next triangle.
-    if army >= 12:
-        for t in owned:
-            if t[:3] in used_tris or t[:3] not in hold_group:
-                continue
-            if all(avail.get(c, 0) + locked_end.get(c, 0) > opp.get(c, 0) for c in t[:3]):
-                for c in t[:3]:
-                    need_hold = max(0, 1 - locked_end.get(c, 0))
-                    take = min(avail.get(c, 0), need_hold)
-                    avail[c] -= take
+    # PHASE LOCK (light): units on corners of owned triangles whose spawn turn is
+    # NEXT (phase 2) hold their position — max 1 per corner, and never lock more
+    # than half the army (the swarm needs bodies). Phase 0 spawns right now (their
+    # corners are spent this turn anyway) and phase 1 triangles are in their vacate
+    # turn — those units stay FREE.
+    locked_total = 0
+    lock_budget = max(0, army // 2)
+    for t in sorted(owned, key=lambda x: -tri_hub[x[:3]][0]):
+        cs = t[:3]
+        if cs in used_tris or phase_of(cs) != 2:
+            continue
+        if locked_total >= lock_budget:
+            break
+        for c in cs:
+            if locked_total >= lock_budget:
+                break
+            keep = 1 + opp.get(c, 0) if opp.get(c, 0) > 0 else 1
+            lock = min(my.get(c, 0), keep)
+            if lock > 0:
+                take = min(lock, avail.get(c, 0), lock_budget - locked_total)
+                if take > 0:
+                    avail[c] = max(0, avail.get(c, 0) - take)
                     locked_end[c] += take
+                    locked_total += take
 
     avail_total = sum(avail.values())
     must_vacate = {c for t in tris if t[3] != 0 and not t[4] for c in t[:3]} | {
@@ -441,15 +458,17 @@ while True:
     # 4B. REFILL spawn-ready corners BEFORE captures: owned triangles with an empty corner
     # cannot SPAWN (spawn needs >= 1 unit on every corner). This is the spawn engine —
     # without refill the engine dies and we stop growing (how Arnaud.Net outran us).
-    # Runs before capture assignment so engines always get their units first.
-    hold_corners = [c for cs in hold_group for c in cs]
-    engine_tris = hold_group + [
-        t[:3] for t in owned if t[:3] not in used_tris and t[:3] not in hold_group
+    # PHASE DISCIPLINE: only refill phase-2 triangles (their spawn turn is next) —
+    # phase-1 triangles are in their vacate turn and must stay EMPTY (me_cap reset),
+    # phase-0 triangles spawn right now (too late to staff).
+    engine_tris = [
+        t[:3]
+        for t in owned
+        if t[:3] not in used_tris and phase_of(t[:3]) == 2
     ]
-    # Sort engines: hold_group first (spawn-ready next turn), then fewest missing corners
+    # Sort engines: fewest missing corners first (cheapest to make spawn-ready)
     engine_tris.sort(
         key=lambda cs: (
-            0 if cs in hold_group else 1,
             sum(1 for c in cs if locked_end.get(c, 0) == 0),
             -tri_hub[cs][0],
             -tri_hub[cs][1],
@@ -461,7 +480,7 @@ while True:
         for c in cs:
             if locked_end.get(c, 0) == 0 and avail_total > 0:
                 # Few engines left -> unlimited reach, we MUST bring the engine back online
-                reach = 999 if len(engine_tris) <= 2 else (3 if cs in hold_group else 2)
+                reach = 999 if len(engine_tris) <= 2 else 3
                 srcs = [u for u in houses if avail.get(u, 0) > 0 and dist(u, c) <= reach and (u != c or u not in must_vacate)]
                 if srcs:
                     srcs.sort(key=lambda u: (dist(u, c), -avail[u]))
@@ -534,12 +553,17 @@ while True:
     while avail_total > 0 and cands:
         best = None
         active_srcs = [h for h, cnt in avail.items() if cnt > 0]
+        # HARD trap avoidance: if ANY non-trap capture is possible, skip trap-risky
+        # ones entirely — walking into an unbroken enemy ATTACK loses the whole stack.
+        non_trap_exists = any(not trap_risk(t) for t in cands)
         # End-of-turn position estimate: units stay put or land on first_step of their move.
         # Prevents unknowingly parking a pile on a house the opponent can ATTACK next round.
         parked = {h: my.get(h, 0) + spawn_houses.get(h, 0) for h in houses}
         for t in cands:
             corners = t[:3]
             if stay_home and best_imm is not None and not all(c in home_side for c in corners):
+                continue
+            if non_trap_exists and trap_risk(t):
                 continue
             temp_avail = dict(avail)
             temp_parked = dict(parked)
@@ -753,6 +777,18 @@ while True:
             or excess > 0
         )
         if neighs and must_move:
+            # Which triangle is this unit vacating? Prefer parking that stays
+            # adjacent to that triangle's OTHER corners — at the next staffing
+            # phase (2 turns later) the unit steps right back in and the spawn
+            # cycle continues without a dead turn.
+            vacating_tris = [
+                cs for cs in resettable_tris if src in cs
+            ] + [cs for cs in to_spawn if src in cs]
+            park_bonus = set()
+            for cs in vacating_tris[:2]:
+                for other in cs:
+                    if other != src:
+                        park_bonus |= adj.get(other, set())
             dst = min(
                 neighs,
                 key=lambda n: (
@@ -760,6 +796,7 @@ while True:
                     n not in home_side if stay_home else False,
                     corner_deg.get(n, 0) == 0,
                     n in must_vacate,
+                    0 if n in park_bonus else 1,
                     1 if (n in attack_danger and locked_end.get(n, 0) >= 2) else 0,
                     opp.get(n, 0) > locked_end.get(n, 0) + 1,
                     -cand_home_deg[n],
