@@ -2,6 +2,12 @@ import sys
 import time
 from collections import deque
 
+try:
+    import numpy as np
+    from scipy.optimize import linear_sum_assignment
+except ImportError:
+    linear_sum_assignment = None
+
 # Tunable weights (unit value = WU).
 P = {
     "WU": 10.0,  # value of one of our units
@@ -372,6 +378,20 @@ while True:
                 plan.append((h, c, take, not mecap[i]))
                 if r <= 0:
                     break
+    # keep the greedy choice of corners, but pick the units by min total distance
+    if plan and linear_sum_assignment is not None:
+        slots = []
+        for h, c, n, w in plan:
+            slots += [(c, w)] * n
+        uh = [h for h in range(N) for _ in range(my[h])]
+        ri, ci = linear_sum_assignment(np.array([[dist[h][c] for c, _ in slots] for h in uh]))
+        free = my[:]
+        agg = {}
+        for r, k in zip(ri, ci):
+            free[uh[r]] -= 1
+            key = (uh[r],) + slots[k]
+            agg[key] = agg.get(key, 0) + 1
+        plan = [(h, c, n, w) for (h, c, w), n in agg.items()]
 
     # idle pull: nearest corner of any triangle we do not own
     tgt_idle = set()
