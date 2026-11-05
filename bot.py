@@ -63,14 +63,19 @@ def ints():
 
 
 N = int(input())
+xy = [None] * N
 for _ in range(N):
-    input()
+    h, x, y = ints()
+    xy[h] = (x, y)
 
 nb = None
 dist = None
 order_from = None
 tri_c = None
 tri_nb = None
+graph_key = None
+tri_key = None
+st_me = st_op = None
 turn = 0
 
 # ---------------- opponent model (learned from state diffs, actions are not in the input) ----------------
@@ -91,24 +96,27 @@ sur_lost = 0  # our units lost without an attack (surrounded)
 SUR_TAB = [0.5, 0.12, 0.05, 0.015, 0.005]
 sur_pred = 0.0
 sur_act = 0
-prev = None  # (my, op, owner, opcap, our moves, our spawns, our attacks)
+prev = None  # (my, op, owner, opcap, our moves, our spawns, our attacks, tri_c, tri_nb, nb)
 
 
-def cap_feat(i, mine, theirs):
+def cap_feat(cs, mine, theirs, nbl):
     m = w = 0
-    for c in tri_c[i]:
+    for c in cs:
         if theirs[c] > mine[c]:
             m += 1
-        if theirs[c] + sum(theirs[n] for n in nb[c]) > mine[c]:
+        if theirs[c] + sum(theirs[n] for n in nbl[c]) > mine[c]:
             w += 1
     return CAP_TAB.get((m, w), 0.0)
 
 
 def learn(my, op, owner):
-    """Update the opponent model from what changed since our previous turn."""
+    """Update the opponent model from what changed since our previous turn.
+    Paths can change in between: triangles are matched by corners, one that disappeared has owner None."""
     global cap_pred, cap_act, own_n, own_kept, sur_lost, sur_pred, sur_act
-    pmy, pop, pown, popcap, pmoves, pspawns, patks = prev
-    T_ = len(tri_c)
+    pmy, pop, pown, popcap, pmoves, pspawns, patks, ptri, ptnb, pnb = prev
+    own_now = dict(zip(tri_c, owner))
+    owner = [own_now.get(cs) for cs in ptri]
+    T_ = len(ptri)
     exp = pmy[:]
     for a, b, c, tg in patks:
         for x in (a, b, c):
@@ -121,17 +129,17 @@ def learn(my, op, owner):
     for s in pspawns:
         exp[s] += 1
     deficit = [exp[x] - my[x] for x in range(N)]
-    usable = [i for i in range(T_) if pown[i] == 1 and all(pop[c] >= 1 for c in tri_c[i])]
+    usable = [i for i in range(T_) if pown[i] == 1 and all(pop[c] >= 1 for c in ptri[i])]
     used = [i for i in usable if owner[i] == -1]
     reach = set()
     for i in usable:
-        reach.update(tri_nb[i])
+        reach.update(ptnb[i])
     kmax = max((pmy[h] for h in reach), default=0)
     hits = 0
     if used:
         tg_set = set()
         for i in used:
-            tg_set.update(tri_nb[i])
+            tg_set.update(ptnb[i])
         for h in sorted((h for h in tg_set if pmy[h] > 0), key=lambda h: -pmy[h]):
             if hits >= len(used):
                 break
@@ -148,8 +156,8 @@ def learn(my, op, owner):
     for h in range(N):
         if exp[h] <= 0:
             continue
-        ns = nb[h]
-        if not all(pop[n] + sum(pop[m] for m in nb[n]) > exp[n] for n in ns):
+        ns = pnb[h]
+        if not ns or not all(pop[n] + sum(pop[m] for m in pnb[n]) > exp[n] for n in ns):
             continue
         need = sum(exp[n] - pop[n] + 1 for n in ns if pop[n] <= exp[n])
         sur_pred += SUR_TAB[need if need < 4 else 4]
@@ -163,7 +171,7 @@ def learn(my, op, owner):
             own_n += 1
             own_kept += owner[i] == 1
         elif popcap[i]:
-            cap_pred += cap_feat(i, pmy, pop)
+            cap_pred += cap_feat(ptri[i], pmy, pop, pnb)
             cap_act += owner[i] == 1
 
 
@@ -186,12 +194,18 @@ while True:
         h, a, b = ints()
         my[h] = a
         op[h] = b
-    edges = [ints() for _ in range(int(input()))]
+    edges = [tuple(ints()) for _ in range(int(input()))]
     raw = [input().split() for _ in range(int(input()))]
-    for _ in range(int(input())):
-        input()
+    links = [tuple(ints()) for _ in range(int(input()))]
 
-    if nb is None:
+    # paths change during the game (ADD_PATH / REMOVE_PATH by either player)
+    if st_me is None:
+        st_me = [h for h in range(N) if my[h] > 0]
+        st_op = [h for h in range(N) if op[h] > 0]
+    gk = tuple(edges)
+    graph_changed = gk != graph_key
+    if graph_changed:
+        graph_key = gk
         nb = [[] for _ in range(N)]
         for a, b in edges:
             nb[a].append(b)
@@ -211,7 +225,11 @@ while True:
                         q.append(v)
             dist.append(d)
         order_from = [sorted(range(N), key=lambda h, s=s: dist[s][h]) for s in range(N)]
-        tri_c = [(int(r[0]), int(r[1]), int(r[2])) for r in raw]
+        near2 = [[h for h in range(N) if dist[x][h] <= 2] for x in range(N)]
+    tk = tuple((int(r[0]), int(r[1]), int(r[2])) for r in raw)
+    if graph_changed or tk != tri_key:
+        tri_key = tk
+        tri_c = list(tk)
         tris_of = [[] for _ in range(N)]
         for i, cs in enumerate(tri_c):
             for c in cs:
@@ -222,10 +240,7 @@ while True:
             for c in cs:
                 s.update(nb[c])
             tri_nb.append(sorted(s))
-        near2 = [[h for h in range(N) if dist[x][h] <= 2] for x in range(N)]
         # home side of each triangle: whose start is closer to all of its corners
-        st_me = [h for h in range(N) if my[h] > 0]
-        st_op = [h for h in range(N) if op[h] > 0]
         side = []
         for cs in tri_c:
             dm = max(min(dist[s][c] for s in st_me) for c in cs) if st_me else 99
@@ -257,7 +272,7 @@ while True:
             if owner[i] == 1:
                 th = keep * (0.9 if all(op[c] >= 1 for c in cs) else 0.3)
             elif opcap[i]:
-                th = min(0.9, cap_feat(i, my, op) * act * capw)
+                th = min(0.9, cap_feat(tri_c[i], my, op, nb) * act * capw)
             else:
                 continue
             if th <= 0:
@@ -540,8 +555,8 @@ while True:
         """(owner of house x, value of its units) for the current cnt."""
         c = cnt[x]
         o = op[x]
-        allmine = nmine[x] == deg[x]
-        allop = nopp[x] == deg[x]
+        allmine = deg[x] > 0 and nmine[x] == deg[x]
+        allop = deg[x] > 0 and nopp[x] == deg[x]
         ow = 0 if allmine else 1 if allop else 0 if c > o else 1 if o > c else -1
         v = 0.0
         if c > 0:
@@ -552,7 +567,7 @@ while True:
                     v -= danger[x] * (EXP * c if c >= 3 else EXP2 * c)
                 if use_surr:
                     ns = nb[x]
-                    if all(oreach[n] > cnt[n] for n in ns):
+                    if ns and all(oreach[n] > cnt[n] for n in ns):
                         need = 0
                         for n in ns:
                             if op[n] <= cnt[n]:
@@ -678,7 +693,7 @@ while True:
         if t < 0 or time.perf_counter() - t_start > budget:
             continue
         p = tok_pos[k]
-        if p == t or (tok_wait[k] and dist[p][t] <= 1):
+        if p == t or (tok_wait[k] and dist[p][t] <= 1) or dist[p][t] >= 99:
             continue
         step = min((n for n in nb[p]), key=lambda n: (dist[n][t], n))
         d, st = eval_moves([(k, step)])
@@ -886,7 +901,7 @@ while True:
             our_atk.append(tuple(int(x) for x in f[1:5]))
         elif f[0] == "SPAWN":
             our_sp.append(int(f[1]))
-    prev = (my0, op0, owner, opcap, [(a, b, n) for (a, b), n in moves.items()], our_sp, our_atk)
+    prev = (my0, op0, owner, opcap, [(a, b, n) for (a, b), n in moves.items()], our_sp, our_atk, tri_c, tri_nb, nb)
     ms = int((time.perf_counter() - t_start) * 1000)
     def f2(v):
         return f"{v:.2f}".rstrip("0").rstrip(".").lstrip("0") or "0"

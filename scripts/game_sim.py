@@ -1,6 +1,6 @@
 """
-Minimal TryAngle Catch referee (Wood 1+: ATTACK, MOVE, SPAWN) for local bot tests.
-Turn phases: ATTACK → MOVE → SPAWN → surround → capture (see statement.md).
+Minimal TryAngle Catch referee (Bronze: ATTACK, MOVE, SPAWN, ADD_PATH, REMOVE_PATH) for local bot tests.
+Turn phases: ATTACK → MOVE → SPAWN → ADD_PATH → REMOVE_PATH → surround → capture (see statement.md).
 Logic aligned with github.com/eulerscheZahl/TryAngle-Catch.
 """
 from __future__ import annotations
@@ -15,9 +15,15 @@ from typing import Dict, List, Optional, Set, Tuple
 
 Coord = Tuple[int, int]
 
+MAX_PATH_LENGTH = 400
+
 
 def ccw(a: Coord, b: Coord, c: Coord) -> bool:
     return (c[1] - a[1]) * (b[0] - a[0]) > (b[1] - a[1]) * (c[0] - a[0])
+
+
+def dist2(a: Coord, b: Coord) -> int:
+    return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
 
 
 def point_in_triangle(p: Coord, a: Coord, b: Coord, c: Coord) -> bool:
@@ -90,7 +96,9 @@ class Board:
     triangles: List[Triangle]
     scores: List[int] = field(default_factory=lambda: [0, 0])
     turn: int = 0
+    allow_paths: bool = True  # Bronze+: ADD_PATH / REMOVE_PATH and the linkable list
     _surrounded: bool = False
+    _links: Optional[tuple] = None
 
     @staticmethod
     def from_game_options(text: str) -> "Board":
@@ -122,6 +130,53 @@ class Board:
 
     def reset_remaining(self) -> None:
         self.remaining = {n: u[:] for n, u in self.units.items()}
+
+    def edges(self) -> List[Tuple[int, int]]:
+        return [(a, b) for a in sorted(self.adj) for b in sorted(self.adj[a]) if a < b]
+
+    def can_connect(self, a: int, b: int) -> bool:
+        """Board.canConnect: length <= 400 and no crossing (shared endpoints do not cross)."""
+        pa, pb = self.coords[a], self.coords[b]
+        if dist2(pa, pb) > MAX_PATH_LENGTH * MAX_PATH_LENGTH:
+            return False
+        if a == b:
+            return True
+        for c, d in self.edges():
+            if c in (a, b) or d in (a, b):
+                continue
+            pc, pd = self.coords[c], self.coords[d]
+            if ccw(pa, pc, pd) != ccw(pb, pc, pd) and ccw(pa, pb, pc) != ccw(pa, pb, pd):
+                return False
+        return True
+
+    def linkable(self) -> List[Tuple[int, int]]:
+        # cached per edge set: ~5 ms per call would otherwise count against the bots in arena timings
+        key = tuple(self.edges())
+        if self._links is None or self._links[0] != key:
+            ns = sorted(self.coords)
+            links = [
+                (a, b)
+                for i, a in enumerate(ns)
+                for b in ns[i + 1 :]
+                if b not in self.adj[a] and self.can_connect(a, b)
+            ]
+            self._links = (key, links)
+        return self._links[1]
+
+    def update_triangles(self) -> None:
+        """Board.updateTriangles: surviving triangles keep owner / canCapture, new ones start fresh."""
+        old = {frozenset(t.corners()): t for t in self.triangles}
+        self.triangles = [old.get(frozenset(t.corners()), t) for t in discover_triangles(self.coords, self.adj)]
+
+    def connect(self, a: int, b: int) -> None:
+        self.adj[a].add(b)
+        self.adj[b].add(a)
+        self.update_triangles()
+
+    def disconnect(self, a: int, b: int) -> None:
+        self.adj[a].discard(b)
+        self.adj[b].discard(a)
+        self.update_triangles()
 
     def bfs_dist(self, target: int) -> Dict[int, int]:
         dist = {target: 0}
@@ -224,6 +279,58 @@ class Board:
                 attacks.append((int(parts[1]), int(parts[2]), int(parts[3]), int(parts[4])))
         return attacks, moves, spawns
 
+    def _split_paths(self, pid: int, line: str):
+        """ADD_PATH / REMOVE_PATH as (triangle, from, to); the triangle is resolved now (turn start),
+        like the referee does at parse time."""
+        adds, removes = [], []
+        if not self.allow_paths:
+            return adds, removes
+        for cmd in line.split(";"):
+            parts = cmd.split()
+            if len(parts) != 5 or parts[0].upper() not in ("ADD_PATH", "REMOVE_PATH"):
+                continue
+            a, b, c, to = (int(x) for x in parts[1:])
+            if not all(n in self.coords for n in (a, b, c, to)):
+                continue
+            tri = self._find_tri(a, b, c)
+            if tri is None:
+                continue
+            if parts[0].upper() == "ADD_PATH":
+                adds.append((tri, a, to))
+            elif any(to in self.adj[n] for n in tri.corners()):
+                removes.append((tri, a, to))
+        return adds, removes
+
+    def _add_ok(self, pid: int, tri: Triangle, a: int, to: int) -> bool:
+        return tri.can_use(pid, self.remaining, 1) and to not in self.adj[a] and self.can_connect(a, to)
+
+    def _remove_ok(self, pid: int, tri: Triangle, a: int, to: int) -> bool:
+        return tri.can_use(pid, self.remaining, 1) and to in self.adj[a] and not tri.has_node(to)
+
+    def _apply_path_phase(self, queues, strict, relaxed, apply) -> None:
+        """One task per player per frame, both checked before either applies, cheapest first."""
+        queues = [list(q) for q in queues]
+        while any(queues):
+            frame = []
+            for pid in (0, 1):
+                while queues[pid]:
+                    task = queues[pid].pop(0)
+                    if strict(pid, *task):
+                        frame.append((dist2(self.coords[task[1]], self.coords[task[2]]), pid, task))
+                        break
+            frame.sort(key=lambda f: f[0])
+            for _, pid, task in frame:
+                if relaxed(pid, *task):
+                    apply(pid, *task)
+
+    def _do_add(self, pid: int, tri: Triangle, a: int, to: int) -> None:
+        tri.use_triangle(pid, 1, self.units, self.remaining)
+        self.connect(a, to)
+
+    def _do_remove(self, pid: int, tri: Triangle, a: int, to: int) -> None:
+        tri.use_triangle(pid, 1, self.units, self.remaining)
+        self.disconnect(a, to)
+
     def parse_commands(self, pid: int, line: str) -> None:
         line = line.strip()
         if not line or line == ";":
@@ -289,6 +396,8 @@ class Board:
             t.initial_owner = t.owner
         atk0, move0, spawn0 = self._split_commands(cmd_p0)
         atk1, move1, spawn1 = self._split_commands(cmd_p1)
+        add0, rem0 = self._split_paths(0, cmd_p0)
+        add1, rem1 = self._split_paths(1, cmd_p1)
         # referee: one ATTACK per player per frame, both validated before either applies
         for i in range(max(len(atk0), len(atk1))):
             pair = []
@@ -305,6 +414,10 @@ class Board:
             self.apply_spawn(0, *sp)
         for sp in spawn1:
             self.apply_spawn(1, *sp)
+        self._apply_path_phase(
+            (add0, add1), self._add_ok, lambda pid, tri, a, to: self.can_connect(a, to), self._do_add
+        )
+        self._apply_path_phase((rem0, rem1), self._remove_ok, lambda *_: True, self._do_remove)
         self.end_turn()
 
     def bot_input(self, pid: int = 0) -> str:
@@ -327,7 +440,9 @@ class Board:
             op = 1 if t.can_capture[1 - pid] else 0
             a, b, c = t.corners()
             lines.append(f"{a} {b} {c} {owner} {me} {op}")
-        lines.append("0")
+        links = self.linkable() if self.allow_paths else []
+        lines.append(str(len(links)))
+        lines.extend(f"{a} {b}" for a, b in links)
         return "\n".join(lines) + "\n"
 
     def total_units(self, pid: int = 0) -> int:
