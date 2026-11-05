@@ -153,10 +153,35 @@ všetky varianty (army −1:101, hubold −1:99, nohold −1:90, SURR −1:92) p
 sme vyrovnaní/vpredu, potom nás prespawnuje ~2:1 (spawny 42:89, 60:117) a v presile nás dobíja
 obkľúčením (SUR straty 29–36 našich vs 4–10 jeho). Vo výhrach je pomer spawnov opačný (60:25).
 
-Kalibrovaný surround risk (`SURR`, `SUR_TAB` + per-súper `sur_act/sur_pred` v `learn()`) ostáva
-v kóde, ale **vypnutý (`SURR=0.0`)**: lokálne 178/280 vs army, online 0/4 s kosynus+Erickpi
-(army 3/4) a Dmitryho neporazil. Online výsledky sú šumové (timing mení počet passov) —
-jedna hra nič nedokazuje.
+Kalibrovaný surround risk (`SURR`, `SUR_TAB` + per-súper `sur_act/sur_pred` v `learn()`) bol
+pôvodne vypnutý (online 0/4 s kosynus+Erickpi). **Od 2026-11-05 je zapnutý `SURR=2.0`**, viď
+„Offline counterfactual“ nižšie.
+
+### Offline counterfactual na online logoch + chyba REMOVE_PATH (2026-11-05)
+
+Ťahy sú simultánne, takže súperov zalogovaný príkaz v danom ťahu je presne to, čomu by čelil
+aj ľubovoľný náš variant. `experiments/cf.py BOT [BOT ...] [--labels L ...] [--turns 80]` vezme
+reálne online logy (default: ľahké prehry zo `seeds/index.csv`), na každý reálny stav pustí každý
+variant a ťah vyhodnotí proti súperovmu skutočnému príkazu (straty obkľúčením, Δ jednotiek, Δ
+trojuholníkov, Δ skóre). Bez online hier, ~1 min na 50 hier, bez šumu súperovho výberu.
+
+| SURR | 20 ľahkých prehier: sur / dU / dT | 52 bench hier: sur / dU / dT |
+|---|---|---|
+| 0.0 | 463 / −1124 / −202 | 811 / +28 / −181 |
+| 1.0 | 305 / −941 / −156 | 537 / +287 / −115 |
+| **2.0** | 281 / −909 / −116 | 481 / +348 / −97 |
+| 3.0 | 259 / −900 / −101 | 447 / +362 / −110 |
+| 5.0 | 282 / −933 / −133 | 415 / +338 / −209 |
+
+Lokálna aréna to potvrdzuje (SURR 2.0 vs 0.0: 39:21). Online 23 hier na ľahkých prehrách bolo
+šum (base 12:11 vs surr 12–13:10). Príčiny našich SUR strát (`experiments/sur_cause.py`): ~80 %
+súper v tom ťahu pritiahne/spawne na susedov, ~10 % sme suseda sami opustili, ~3 % statická
+pasca (väčšinou útek z prehratého domu) — preto pomáha predikcia, nie pravidlo.
+
+**Chyba:** v Silver (league < 3) referee path akcie odmieta („Command not available in your
+league: REMOVE_PATH“, 168× v 135 logoch, 12 hier, 4:8), ale bot si trojuholník označil ako
+použitý → prišiel o spawn. Oprava: `paths_ok` = už sme videli neprázdny `linkable` vstup
+(v nižších ligách ho referee posiela vždy prázdny).
 
 Čo NEpomohlo (netreba skúšať znova): `DANGER_CAP>0`, `EXP2>0` (defenzíva = capture stall, lokálne 2/80),
 `CONTEST_D`, ladenie `EXP/V_CAP/V_LOSE/THREAT/SPR/WU` (všetko šum).
@@ -426,6 +451,10 @@ PY
 git show HEAD:bot.py > experiments/base.py
 python3 scripts/variant.py experiments/v1.py '{"ADD_PLAN": 0.25}'      # bot.py + prepísané P
 python3 scripts/arena.py experiments/v1.py experiments/base.py --maps 20 --swap --jobs 8
+# offline vyhodnotenie variantov na reálnych online stavoch (prvá voľba pred online testom)
+python3 experiments/cf.py bot.py experiments/v1.py --turns 80
+# online overenie: default 3 hry (každá proti inému hráčovi), viac len keď treba
+python3 scripts/bench_online.py bot.py --note-match "ľahká" --label x_
 ```
 
 - **Šum arény**: identický bot vs baseline dá 20:20 až 47:33 / 80 hier → rozdiel < ~8/80 nie je signál.

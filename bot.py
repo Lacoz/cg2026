@@ -24,7 +24,7 @@ P = {
     "EXP": 0.0,  # per unit in a >=3 stack inside enemy ATTACK reach
     "EXP2": 0.0,  # per unit in a 2-stack inside enemy ATTACK reach
     "DANGER_CAP": 0.0,  # danger weight of triangles the enemy can capture this turn
-    "SURR": 0.0,  # weight (in units) of the expected loss to being surrounded next turn
+    "SURR": 2.0,  # weight (in units) of the expected loss to being surrounded next turn
     "SPR": 0.4,  # per surplus unit on a house
     "FW": 1.0,  # pull per step toward the assigned corner
     "FW_IDLE": 0.3,  # pull per step for unassigned units
@@ -100,6 +100,9 @@ tri_nb = None
 graph_key = None
 tri_key = None
 st_me = st_op = None
+# ADD_PATH / REMOVE_PATH exist only in leagues where the referee sends linkable pairs (empty otherwise);
+# a rejected command still costs the triangle its spawn
+paths_ok = False
 turn = 0
 
 # ---------------- opponent model (learned from state diffs, actions are not in the input) ----------------
@@ -309,6 +312,7 @@ while True:
     edges = [tuple(ints()) for _ in range(int(input()))]
     raw = [input().split() for _ in range(int(input()))]
     links = [tuple(ints()) for _ in range(int(input()))]
+    paths_ok = paths_ok or bool(links)
 
     # paths change during the game (ADD_PATH / REMOVE_PATH by either player)
     if st_me is None:
@@ -435,7 +439,7 @@ while True:
     # never an edge of one of our own triangles
     gone = set()
     cut_e = set()
-    if P["RM"] and 200 - turn >= P["RM_LEFT"]:
+    if P["RM"] and paths_ok and 200 - turn >= P["RM_LEFT"]:
         rm = []
         for i in range(T):
             if owner[i] != 0 or used[i]:
