@@ -55,6 +55,20 @@ P = {
     "BUDGET": 0.030,
     "ILS": 1,  # spend leftover budget on random kicks + re-descent
     "KICK": 2,  # max tokens moved by one kick
+    "RM": 1,  # REMOVE_PATH to destroy enemy-owned triangles
+    "RM_MIN": 1.0,  # min value of a cut: enemy triangles destroyed minus RM_NEU per neutral home triangle
+    "RM_NEU": 0.3,
+    "RM_LEFT": 8,  # only while at least this many turns are left
+    "ADD": 1,  # ADD_PATH to close new triangles
+    "ADD_MIN": 1.0,  # min summed value of the new triangles of one path
+    "ADD_CONT": 0.6,  # value of a new triangle we hold with enemy units next to it (1.0 if none)
+    "ADD_TWO": 0.3,  # ... we hold 2 corners, the enemy none
+    "ADD_GIFT": 0.5,  # penalty: the enemy holds a corner
+    "ADD_ARMY": 6,
+    "ADD_RATIO": 1.3,  # only while our army is at least this fraction of the enemy's
+    "ADD_T0": 15,  # first turn
+    "ADD_LEFT": 5,
+    "ADD_W": 1.0,  # weight of a new triangle in the move search
 }
 
 
@@ -167,12 +181,48 @@ def learn(my, op, owner):
         atk_n[k] += 1
         atk_a[k] += 1 if hits else 0
     for i in range(T_):
+        if owner[i] is None:
+            continue
         if pown[i] == 1:
             own_n += 1
             own_kept += owner[i] == 1
         elif popcap[i]:
             cap_pred += cap_feat(ptri[i], pmy, pop, pnb)
             cap_act += owner[i] == 1
+
+
+def ccw(a, b, c):
+    return (c[1] - a[1]) * (b[0] - a[0]) > (b[1] - a[1]) * (c[0] - a[0])
+
+
+def crosses(a, b, c, d):
+    """Edge.isCrossing of paths a-b and c-d (houses); sharing an endpoint is no crossing."""
+    if a in (c, d) or b in (c, d):
+        return False
+    pa, pb, pc, pd = xy[a], xy[b], xy[c], xy[d]
+    return ccw(pa, pc, pd) != ccw(pb, pc, pd) and ccw(pa, pb, pc) != ccw(pa, pb, pd)
+
+
+empty_cache = {}
+
+
+def empty_tri(cs):
+    """No other house inside triangle cs (Board.isInside), i.e. the three paths make a triangle."""
+    cs = tuple(sorted(cs))
+    r = empty_cache.get(cs)
+    if r is None:
+        pa, pb, pc = xy[cs[0]], xy[cs[1]], xy[cs[2]]
+        r = True
+        for h in range(N):
+            if h in cs:
+                continue
+            p = xy[h]
+            c1, c2, c3 = ccw(p, pa, pb), ccw(p, pb, pc), ccw(p, pc, pa)
+            if c1 == c2 == c3:
+                r = False
+                break
+        empty_cache[cs] = r
+    return r
 
 
 def atk_prob():
@@ -226,6 +276,7 @@ while True:
             dist.append(d)
         order_from = [sorted(range(N), key=lambda h, s=s: dist[s][h]) for s in range(N)]
         near2 = [[h for h in range(N) if dist[x][h] <= 2] for x in range(N)]
+        nbs = [set(l) for l in nb]
     tk = tuple((int(r[0]), int(r[1]), int(r[2])) for r in raw)
     if graph_changed or tk != tri_key:
         tri_key = tk
@@ -313,6 +364,110 @@ while True:
         my[b] -= 1
         my[c] -= 1
         cmds.append(f"ATTACK {a} {b} {c} {tg}")
+
+    # ---------------- REMOVE_PATH ----------------
+    # cut an edge u-v of enemy triangles, u a corner of our triangle, v not (referee rule);
+    # never an edge of one of our own triangles
+    gone = set()
+    cut_e = set()
+    if P["RM"] and 200 - turn >= P["RM_LEFT"]:
+        rm = []
+        for i in range(T):
+            if owner[i] != 0 or used[i]:
+                continue
+            cs = tri_c[i]
+            if my[cs[0]] < 1 or my[cs[1]] < 1 or my[cs[2]] < 1:
+                continue
+            for u in cs:
+                for v in nb[u]:
+                    if v in cs:
+                        continue
+                    hit = [j for j in tris_of[u] if v in tri_c[j]]
+                    if any(owner[j] == 0 for j in hit) or not any(owner[j] == 1 for j in hit):
+                        continue
+                    rm.append((sum(owner[j] == 1 for j in hit), i, u, v, hit))
+        rm.sort(key=lambda r: -r[0])
+        for _, i, u, v, hit in rm:
+            cs = tri_c[i]
+            if used[i] or any(my[c] < 1 for c in cs):
+                continue
+            hit = [j for j in hit if j not in gone]
+            val = sum(owner[j] == 1 for j in hit) - P["RM_NEU"] * sum(owner[j] == -1 and side[j] == 1 for j in hit)
+            if val < P["RM_MIN"]:
+                continue
+            used[i] = True
+            gone.update(hit)
+            cut_e.add((u, v))
+            cut_e.add((v, u))
+            for c in cs:
+                my[c] -= 1
+            o = [c for c in cs if c != u]
+            cmds.append(f"REMOVE_PATH {u} {o[0]} {o[1]} {v}")
+    for j in gone:
+        used[j] = True
+
+    # ---------------- ADD_PATH ----------------
+    # a new path u-w (u a corner of our triangle) closes triangles u-w-x over common neighbours x;
+    # paths are added before captures, so corners we still hold are captured this very turn
+    virt = []  # corners of the new triangles, valued by the move search like capturable ones
+    if (
+        P["ADD"]
+        and links
+        and army >= P["ADD_ARMY"]
+        and army >= oarmy * P["ADD_RATIO"]
+        and P["ADD_T0"] <= turn <= 200 - P["ADD_LEFT"]
+    ):
+        lk = {}
+        for a, b in links:
+            lk.setdefault(a, []).append(b)
+            lk.setdefault(b, []).append(a)
+        orc = [op[h] + sum(op[n] for n in nb[h]) for h in range(N)]
+        adds = []
+        for i in range(T):
+            if owner[i] != 0 or used[i]:
+                continue
+            cs = tri_c[i]
+            if my[cs[0]] < 1 or my[cs[1]] < 1 or my[cs[2]] < 1:
+                continue
+            for u in cs:
+                for w in lk.get(u, ()):
+                    news = []
+                    val = 0.0
+                    for x in nb[u]:
+                        if x not in nbs[w] or (u, x) in cut_e or (w, x) in cut_e or not empty_tri((u, w, x)):
+                            continue
+                        tc = (u, w, x)
+                        m = [my[c] - (c in cs) for c in tc]
+                        sec = sum(m[k] > op[c] for k, c in enumerate(tc))
+                        if sec == 3:
+                            v = 1.0 if all(orc[c] == 0 for c in tc) else P["ADD_CONT"]
+                        elif any(op[c] > m[k] for k, c in enumerate(tc)):
+                            v = -P["ADD_GIFT"]
+                        elif sec == 2:
+                            v = P["ADD_TWO"]
+                        else:
+                            v = 0.0
+                        val += v
+                        news.append(tuple(sorted(tc)))
+                    if news:
+                        adds.append((val, i, u, w, news))
+        adds.sort(key=lambda r: -r[0])
+        new_e = []
+        seen_t = set()
+        for val, i, u, w, news in adds:
+            cs = tri_c[i]
+            if val < P["ADD_MIN"] or used[i] or any(my[c] < 1 for c in cs):
+                continue
+            if any(crosses(u, w, a, b) for a, b in new_e) or any(t in seen_t for t in news):
+                continue
+            used[i] = True
+            new_e.append((u, w))
+            seen_t.update(news)
+            virt.extend(news)
+            for c in cs:
+                my[c] -= 1
+            o = [c for c in cs if c != u]
+            cmds.append(f"ADD_PATH {u} {o[0]} {o[1]} {w}")
 
     # ---------------- SPAWN ----------------
     spawn_tris = []
@@ -585,7 +740,14 @@ while True:
     tri_st = []
     for i in range(T):
         so, sm = (-1, False) if used[i] else (owner[i], mecap[i])
-        tri_st.append(tri_c[i] + (so, sm, used[i], so == -1 and opcap[i], tw[i]))
+        tri_st.append(tri_c[i] + (so, sm, used[i], so == -1 and opcap[i], 0.0 if i in gone else tw[i]))
+    tof = tris_of
+    if virt:
+        tof = [l[:] for l in tris_of]
+        for cs in virt:
+            for c in cs:
+                tof[c].append(len(tri_st))
+            tri_st.append(cs + (-1, True, False, True, P["ADD_W"]))
 
     def tri_term(i, own):
         a, b, c, so, sm, usd, oppc, w = tri_st[i]
@@ -619,7 +781,7 @@ while True:
     hv = [0.0] * N
     for x in range(N):
         own[x], hv[x] = house_eval(x)
-    tv = [tri_term(i, own) for i in range(T)]
+    tv = [tri_term(i, own) for i in range(len(tri_st))]
 
     def eval_moves(mv):
         """mv: list of (token, new_pos). Returns (delta, state) without committing.
@@ -654,9 +816,9 @@ while True:
                 own[x] = o_
         TS = set()
         for x in hs:
-            TS.update(tris_of[x])
+            TS.update(tof[x])
         for x, _ in flip:
-            TS.update(tris_of[x])
+            TS.update(tof[x])
         nt = []
         for i in TS:
             v = tri_term(i, own)
@@ -897,7 +1059,7 @@ while True:
     our_sp = []
     for c in cmds:
         f = c.split()
-        if f[0] == "ATTACK":
+        if f[0] in ("ATTACK", "REMOVE_PATH", "ADD_PATH"):
             our_atk.append(tuple(int(x) for x in f[1:5]))
         elif f[0] == "SPAWN":
             our_sp.append(int(f[1]))
