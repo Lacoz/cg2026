@@ -15,7 +15,7 @@ předlžovania kontextu — čo funguje, čo nie a prečo.
 | `bot_submitted.py` | Kód posledného submitu na CG (2026-11-04 10:22 UTC). |
 | `bot_missions_backup.py` | Experiment „missions" (perzistentné ciele + mass-spawn). Lokálne OK, **online 0 % win rate** — príčina nezistená. NEsubmitovať. |
 | `bot_recovered.py` | Medzistav recovery (pred replayom patchov), môžeš zmazať. |
-| `statement.md` | Pravidlá Wood 1 (sedia s webom). |
+| `statement.md` | Pravidlá (Bronze: ADD/REMOVE path, debug drawing). |
 | `BOT_SPEC.md` | Detailná špecifikácia + historické analýzy (čiastočne staré). |
 | `scoring.yaml` | Opponent `default` ×5, brány: win_rate ≥ 0.2, median ≥ 3, crash ≤ 0.5. Boss sekcia zapoznámkovaná (NO_BOSS v Wood). |
 | `tmp_seed_*.txt` | Full game_options seedov na lokálny replay (466 = Arnaud.Net, 328 = M_C, 436/−7474/−8423/194). |
@@ -152,6 +152,59 @@ jedna hra nič nedokazuje.
 Nástroje: `scripts/arena.py A.py B.py --maps N --swap` (lokálny turnaj), `scripts/variant.py out.py '{"K":v}'`
 (variant parametrov), `scripts/replay_log.py <game_id> --losses --cmds` (resimulácia online logu +
 straty ATK/SUR), `scripts/trace.py`, `scripts/losses.py`.
+
+## Statický plán ciest + debug kreslenie (Bronze, 2026-11-05)
+
+`bot.py` po každej zmene grafu (1. ťah + každý ADD/REMOVE ktoréhokoľvek hráča) spraví statickú
+analýzu mapy `path_plan(links)` (vlastníctvo ignoruje) a výsledok **kreslí do viewera v každom ťahu**.
+
+**ADD kandidáti** (`plan_add`, max `PL_ADD_K = 8`):
+- každá dvojica z `linkable` vstupu `u–w`; nové trojuholníky = spoloční susedia `x` s prázdnym
+  `u-w-x` (`empty_tri`). Aspoň jeden z `u`, `w` musí byť rohom existujúceho trojuholníka (inak
+  sa link nedá nikdy použiť).
+- hodnota = súčet cez nové trojuholníky podľa strany (`tri_side`, rovnaké pravidlo ako `side`):
+  `PL_SIDE = (0.2, 0.6, 1.0)` pre súperovu / spornú / našu stranu; remíza → kratší link (tak ako referee).
+- výber greedy: link nesmie krížiť už vybraný a nesmie zdieľať nový trojuholník → nakreslené linky
+  sa dajú pridať všetky naraz.
+
+**REMOVE kandidáti** (`plan_rm`, max `PL_RM_K = 6`):
+- hrana `u–v`, ktorá je stranou aspoň 1 trojuholníka; hodnota = `−Σ side` zničených trojuholníkov
+  (súperova strana +1, naša −1), berú sa len kladné.
+- musí sa dať prerušiť z trojuholníka na našej alebo spornej strane, ktorý má za roh práve jeden
+  koniec hrany (pravidlo referee: cieľ nesmie byť rohom použitého trojuholníka).
+
+**Kreslenie** (`DBG = 1`, farba = farba hráča, nedá sa zmeniť → rozlíšené tvarom):
+- ADD: `LINE` po navrhovanej ceste + `TEXT A<poradie>+<počet nových tri>` v strede.
+- REMOVE: `CIRCLE` (r=16) v strede hrany + `TEXT R<poradie>-<počet zničených tri>`.
+- Viewer skryje každú debug entitu, ktorá v danom frame nepríde znova (`DebugModule.js`), a referee
+  zmaže všetko, ak v ťahu nikto nič nepošle → kresba len v 1. ťahu by zmizla, preto každý ťah.
+- Limit 50 entít na hráča **za celú hru** (entity sa recyklujú podľa typu): 8×2 + 6×2 = 28.
+  Súradnice = priamo `x y` domov zo vstupu. Text max 20 znakov. Viditeľné len vlastné
+  (prepínač vo viewer nastaveniach). Výstup ~600 znakov, čas ~0 ms.
+
+Na 14 uložených mapách: 12–72 `linkable` párov, z toho 4–26 uzavrie **2 trojuholníky naraz**
+(väčšinou na našej strane, a zrkadlovo aj u súpera); 9–63 hrán zdieľajú 2 trojuholníky.
+
+**Plán zatiaľ hru neriadi.** Zapojenie existuje, ale je vypnuté, lebo v lokálnej aréne
+(`scripts/arena.py` vs pôvodný bot, 40 hier so `--swap`) žiadny variant nepomohol:
+
+| variant | W:L |
+|---|---|
+| kontrola (plán vypnutý = pôvodný bot) | 20:20 (na ďalších 80 hrách 47:33 → šum ≈ ±7/80) |
+| `ADD_PLAN 0.5` + plánované linky bez army-ratio brány od T15 | 15:25 |
+| ... + od T5 (`ADD_PLAN_T0 = 5`) | 10:30 |
+| ... od T5 + `PLAN_W 0.3` (move search vopred obsadzuje rohy budúcich tri) | 9:31 |
+| `ADD_PLAN 0.5` od T15 + `PLAN_W 0.3` | 13:27 |
+| len `PLAN_W 0.15` | 13:27 |
+| len bonus `ADD_PLAN 0.5` (brány ponechané) | 19:21 |
+| len bonus `ADD_PLAN 0.25` (brány ponechané) | 23:17, na ďalších 80: 39:41 → bez efektu |
+
+Parametre: `ADD_PLAN` (bonus plánovaného linku pri výbere ADD_PATH), `ADD_PLAN_T0` / `ADD_PLAN_ARMY`
+(od kedy plánované linky obchádzajú `ADD_RATIO` a `ADD_T0`), `PLAN_W` (váha virtuálnych
+trojuholníkov plánovaných linkov, ak vlastníme trojuholník s rohom `u` alebo `w`).
+Pozor: aréna je self-play proti botovi, ktorý cesty skoro nepoužíva — na online súperoch v Bronze
+to treba overiť. Online hry z Wood (13 hier s pomenovanými súpermi + 60 arénových) nemajú ani jeden
+ADD/REMOVE od súpera, ale v Wood tieto akcie neboli dostupné.
 
 ## Benchmark (2026-11-04, 11:30)
 

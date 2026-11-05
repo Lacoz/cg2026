@@ -69,6 +69,16 @@ P = {
     "ADD_T0": 15,  # first turn
     "ADD_LEFT": 5,
     "ADD_W": 1.0,  # weight of a new triangle in the move search
+    # static path plan, recomputed whenever the graph changes (see path_plan)
+    "PL_ADD_K": 8,  # planned ADD_PATH links kept (and drawn)
+    "PL_RM_K": 6,  # planned REMOVE_PATH cuts kept (and drawn)
+    "PL_SIDE": (0.2, 0.6, 1.0),  # value of a new triangle on the enemy / contested / our side
+    # the plan does not steer play by default: every setting tried lost to it off in the local arena
+    "ADD_PLAN": 0.0,  # bonus of a planned link in the ADD_PATH choice
+    "ADD_PLAN_T0": 999,  # planned links skip the army-ratio gate from this turn on
+    "ADD_PLAN_ARMY": 6,
+    "PLAN_W": 0.0,  # move-search weight of the triangles a planned link would close
+    "DBG": 1,  # draw the plan in the viewer
 }
 
 
@@ -225,6 +235,58 @@ def empty_tri(cs):
     return r
 
 
+def tri_side(cs):
+    """1: closer to our start, -1: closer to the enemy's, 0: contested (same rule as `side`)."""
+    dm = max(min(dist[s][c] for s in st_me) for c in cs)
+    do = max(min(dist[s][c] for s in st_op) for c in cs)
+    return 1 if dm < do else -1 if do < dm else 0
+
+
+def path_plan(links):
+    """Static map analysis, ownership ignored.
+    ADD: links u-w closing empty triangles u-w-x, valued by side, that some existing triangle
+    could add (u or w is its corner); picked greedily so the chosen links do not cross.
+    REMOVE: edges whose cut destroys enemy-side triangles, cuttable from a triangle on our or the
+    contested side that has one end of the edge as a corner but not the other."""
+    sv = P["PL_SIDE"]
+    adds = []
+    for u, w in links:
+        if not tris_of[u] and not tris_of[w]:
+            continue
+        news = [tuple(sorted((u, w, x))) for x in nbs[u] & nbs[w] if empty_tri((u, w, x))]
+        if not news:
+            continue
+        val = sum(sv[tri_side(t) + 1] for t in news)
+        d2 = (xy[u][0] - xy[w][0]) ** 2 + (xy[u][1] - xy[w][1]) ** 2
+        adds.append((-val, d2, min(u, w), max(u, w), news))
+    adds.sort()
+    pa = []
+    seen = set()
+    for nv, _, u, w, news in adds:
+        if len(pa) >= P["PL_ADD_K"]:
+            break
+        if any(crosses(u, w, a, b) for _, a, b, _ in pa) or any(t in seen for t in news):
+            continue
+        seen.update(news)
+        pa.append((-nv, u, w, news))
+    rms = []
+    for u in range(N):
+        for v in nb[u]:
+            if v < u:
+                continue
+            hit = [j for j in tris_of[u] if v in tri_c[j]]
+            if not hit:
+                continue
+            if not any(side[j] >= 0 and (u in tri_c[j]) != (v in tri_c[j]) for j in tris_of[u] + tris_of[v]):
+                continue
+            val = -sum(side[j] for j in hit)
+            if val > 0:
+                rms.append((-val, u, v, len(hit)))
+    rms.sort()
+    pr = [(-nv, u, v, k) for nv, u, v, k in rms[: P["PL_RM_K"]]]
+    return pa, pr
+
+
 def atk_prob():
     p = [0.0] * 6
     for k in range(1, 6):
@@ -298,6 +360,9 @@ while True:
             do = max(min(dist[s][c] for s in st_op) for c in cs) if st_op else 99
             side.append(1 if dm < do else -1 if do < dm else 0)
         tw = [1.0 + P["HOME_W"] if s == 1 else 1.0 - P["AWAY_W"] if s == -1 else 1.0 for s in side]
+    if graph_changed:
+        plan_add, plan_rm = path_plan(links)
+        plan_set = {(u, w) for _, u, w, _ in plan_add}
 
     T = len(tri_c)
     owner = [int(r[3]) for r in raw]
@@ -410,13 +475,10 @@ while True:
     # a new path u-w (u a corner of our triangle) closes triangles u-w-x over common neighbours x;
     # paths are added before captures, so corners we still hold are captured this very turn
     virt = []  # corners of the new triangles, valued by the move search like capturable ones
-    if (
-        P["ADD"]
-        and links
-        and army >= P["ADD_ARMY"]
-        and army >= oarmy * P["ADD_RATIO"]
-        and P["ADD_T0"] <= turn <= 200 - P["ADD_LEFT"]
-    ):
+    add_any = army >= P["ADD_ARMY"] and army >= oarmy * P["ADD_RATIO"] and turn >= P["ADD_T0"]
+    add_plan = army >= P["ADD_PLAN_ARMY"] and turn >= P["ADD_PLAN_T0"]
+    new_e = []
+    if P["ADD"] and links and (add_any or add_plan) and turn <= 200 - P["ADD_LEFT"]:
         lk = {}
         for a, b in links:
             lk.setdefault(a, []).append(b)
@@ -431,8 +493,11 @@ while True:
                 continue
             for u in cs:
                 for w in lk.get(u, ()):
+                    planned = (min(u, w), max(u, w)) in plan_set
+                    if not (add_any or planned):
+                        continue
                     news = []
-                    val = 0.0
+                    val = P["ADD_PLAN"] if planned else 0.0
                     for x in nb[u]:
                         if x not in nbs[w] or (u, x) in cut_e or (w, x) in cut_e or not empty_tri((u, w, x)):
                             continue
@@ -452,7 +517,6 @@ while True:
                     if news:
                         adds.append((val, i, u, w, news))
         adds.sort(key=lambda r: -r[0])
-        new_e = []
         seen_t = set()
         for val, i, u, w, news in adds:
             cs = tri_c[i]
@@ -468,6 +532,15 @@ while True:
                 my[c] -= 1
             o = [c for c in cs if c != u]
             cmds.append(f"ADD_PATH {u} {o[0]} {o[1]} {w}")
+    # planned links we can add from a triangle we own: pre-position units on their new corners
+    pvirt = []
+    if P["PLAN_W"] > 0 and P["ADD"] and turn <= 200 - P["ADD_LEFT"]:
+        vs = set(virt)
+        for _, u, w, news in plan_add:
+            if any(crosses(u, w, a, b) for a, b in new_e):
+                continue
+            if any(owner[j] == 0 for j in tris_of[u] + tris_of[w]):
+                pvirt.extend(t for t in news if t not in vs)
 
     # ---------------- SPAWN ----------------
     spawn_tris = []
@@ -742,12 +815,12 @@ while True:
         so, sm = (-1, False) if used[i] else (owner[i], mecap[i])
         tri_st.append(tri_c[i] + (so, sm, used[i], so == -1 and opcap[i], 0.0 if i in gone else tw[i]))
     tof = tris_of
-    if virt:
+    if virt or pvirt:
         tof = [l[:] for l in tris_of]
-        for cs in virt:
+        for cs, w in [(t, P["ADD_W"]) for t in virt] + [(t, P["PLAN_W"]) for t in pvirt]:
             for c in cs:
                 tof[c].append(len(tri_st))
-            tri_st.append(cs + (-1, True, False, True, P["ADD_W"]))
+            tri_st.append(cs + (-1, True, False, True, w))
 
     def tri_term(i, own):
         a, b, c, so, sm, usd, oppc, w = tri_st[i]
@@ -1070,4 +1143,15 @@ while True:
 
     # the viewer shows only ~20 characters
     cmds.insert(0, f"MSG a{f2(pk[2])}/{f2(pk[3])}/{f2(pk[4])} k{f2(keep)} c{f2(act)} x{len(opp_attacks)} s{sur_lost} {ms}ms p{passes}")
+    # the viewer hides debug entities that are not sent again, so the plan is redrawn every turn
+    # (max 50 entities per player and game; LINE+TEXT per link, CIRCLE+TEXT per cut)
+    if P["DBG"]:
+        for r, (v, u, w, news) in enumerate(plan_add, 1):
+            (x1, y1), (x2, y2) = xy[u], xy[w]
+            cmds.append(f"LINE {x1} {y1} {x2} {y2}")
+            cmds.append(f"TEXT {(x1 + x2) // 2 + 6} {(y1 + y2) // 2 + 6} A{r}+{len(news)}")
+        for r, (v, u, w, k) in enumerate(plan_rm, 1):
+            mx, my_ = (xy[u][0] + xy[w][0]) // 2, (xy[u][1] + xy[w][1]) // 2
+            cmds.append(f"CIRCLE {mx} {my_} 16")
+            cmds.append(f"TEXT {mx + 18} {my_ - 12} R{r}-{k}")
     print(";".join(cmds), flush=True)
