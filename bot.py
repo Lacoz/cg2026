@@ -26,6 +26,7 @@ P = {
     "DANGER_CAP": 0.0,  # danger weight of triangles the enemy can capture this turn
     "SURR": 2.0,  # weight (in units) of the expected loss to being surrounded next turn
     "SPR": 0.4,  # per surplus unit on a house
+    "STK": 2.0,  # per extra unit stacked on a house with no enemy on it or next to it
     "FW": 1.0,  # pull per step toward the assigned corner
     "FW_IDLE": 0.3,  # pull per step for unassigned units
     "ATK_MIN": 4,  # min kills for an ATTACK
@@ -102,7 +103,7 @@ tri_key = None
 st_me = st_op = None
 # ADD_PATH / REMOVE_PATH exist only in leagues where the referee sends linkable pairs (empty otherwise);
 # a rejected command still costs the triangle its spawn
-paths_ok = False
+paths_ok = True
 turn = 0
 
 # ---------------- opponent model (learned from state diffs, actions are not in the input) ----------------
@@ -693,6 +694,7 @@ while True:
     V_OPPCAP, V_RESET, V_RPART, V_PART = P["V_OPPCAP"], P["V_RESET"], P["V_RPART"], P["V_PART"]
     THREAT, FW, FWI, SURR = P["THREAT"], P["FW"], P["FW_IDLE"], P["SURR"]
     P_CONT = P["P_CONT"]
+    STK = P["STK"]
     RISK = P["RISK"] * WU
     RISK_NET = P["RISK_NET"]
     oadj = [min(sum(op[n] for n in nb[x]), P["OADJ_MAX"]) for x in range(N)]
@@ -810,6 +812,8 @@ while True:
                 if c > o + 1:
                     s = c - o - 1
                     v -= SPR * s * s
+                if c >= 2 and oreach[x] == 0:
+                    v -= STK * (c - 1)
         if o > 0 and allmine:
             v += WK * o
         return ow, v
