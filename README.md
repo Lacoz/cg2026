@@ -1,4 +1,4 @@
-# Fall Challenge 2026 — TryAngle Catch bot (Wood 1)
+# Fall Challenge 2026 — TryAngle Catch bot (Silver)
 
 Stav k **2026-11-04 09:47**. Cieľ tohto README: aby si vedel pokračovať bez
 předlžovania kontextu — čo funguje, čo nie a prečo.
@@ -9,16 +9,28 @@ předlžovania kontextu — čo funguje, čo nie a prečo.
 
 | Súbor | Čo je |
 |---|---|
-| `bot.py` | **Aktuálny bot = kópia `bot2.py`** (token local search, viď sekciu nižšie). Toto submituj. |
-| `bot2.py` | Vývojová verzia nového bota (rovnaký obsah ako `bot.py`). |
-| `bot_old.py` | Starý „staggered engines" bot (rekonštrukcia: verzia z 12:22 s vypnutou MA cache). |
-| `bot_submitted.py` | Kód posledného submitu na CG (2026-11-04 10:22 UTC). |
-| `bot_missions_backup.py` | Experiment „missions" (perzistentné ciele + mass-spawn). Lokálne OK, **online 0 % win rate** — príčina nezistená. NEsubmitovať. |
-| `bot_recovered.py` | Medzistav recovery (pred replayom patchov), môžeš zmazať. |
+| `bot.py` | **Aktuálny bot** (token local search, viď sekciu nižšie). Toto submituj. Jediný bot v repe — staršie verzie sú v git histórii (tabuľka nižšie). |
+| `ranking.csv` | História nášho ranku (`./cg rank [poznámka]` pripíše riadok z `/progress`). Prvé 2 riadky sú približné, spätne z chatu. `git_head` = lokálny HEAD v čase zápisu, nie nutne kód submisie. |
+| `.cursor/skills/cg-ranking-seeds/` | Projektový Cursor skill: kedy a ako zapisovať `ranking.csv` a `seeds/` (submit, rank, replay, test hry so súperom). |
+| `experiments/` | Lokálne experimenty (varianty bota, baseline kópie pre arénu, logy). V `.gitignore`. |
+| `referee/` | Klon [eulerscheZahl/TryAngle-Catch](https://github.com/eulerscheZahl/TryAngle-Catch) (referee + viewer, Java/JS). V `.gitignore`, používa ho `scripts/local_referee.sh`. |
 | `statement.md` | Pravidlá (Bronze: ADD/REMOVE path, debug drawing). |
 | `BOT_SPEC.md` | Detailná špecifikácia + historické analýzy (čiastočne staré). |
 | `scoring.yaml` | Opponent `default` ×5, brány: win_rate ≥ 0.2, median ≥ 3, crash ≤ 0.5. Boss sekcia zapoznámkovaná (NO_BOSS v Wood). |
-| `tmp_seed_*.txt` | Full game_options seedov na lokálny replay (466 = Arnaud.Net, 328 = M_C, 436/−7474/−8423/194). |
+| `seeds/<hráč>/<seed>.txt` | Full game_options máp z hier proti danému súperovi (záporný seed = prefix `neg`). `default/` = hry proti CG `default`, `unknown/` = súper sa nedal dohľadať. Načítava ich `scripts/arena.py`, `./cg sim --seed-file seeds/czuk/neg5800737516579411000.txt` a
+`./cg replay --game-options "$(cat seeds/czuk/neg5800737516579411000.txt)" --opponent <agent_id>`. Nový hráč: `./cg add <game_id|URL>` (zapíše aj `seeds/index.csv` = odkiaľ seed je, rank súpera, výsledok). |
+
+**Staršie boty v git histórii** (zmazané z repa 2026-11-05; obnov cez
+`git show <commit>:<súbor> > experiments/<súbor>`):
+
+| Súbor | Commit | Čo je |
+|---|---|---|
+| `bot2.py` | `245b55c` | Vývojová verzia token-local-search bota (z nej vznikol `bot.py`). |
+| `bot_e47f61f.py` | `97d0885` | `bot.py` z commitu `e47f61f` (pred spawn-hold a path akciami). |
+| `bot_submitted.py` | `ec647d2` | Kód submitu na CG z 2026-11-04 10:22 UTC. |
+| `bot_old.py` | `ec647d2` | Starý „staggered engines" bot (verzia z 12:22 s vypnutou MA cache). |
+| `bot_missions_backup.py` | `1068179` | Experiment „missions" (perzistentné ciele + mass-spawn). Lokálne OK, **online 0 % win rate** — príčina nezistená. |
+| `bot_recovered.py` | `1068179` | Medzistav recovery (pred replayom patchov). |
 
 **Posledná validácia `bot.py` (2026-11-04, 11:30)**: unit testy 10 OK (2 skip = známy bug) ·
 online `./cg test --games 2` → **2/2 WIN**, všetky brány prešli ·
@@ -45,7 +57,7 @@ spornom území zomierali. Lokálne 126/192 vs predchádzajúca verzia.
 
 ### Model súpera („opponent IQ guess“) + riziko útokov
 
-Input neobsahuje akcie súpera, bot ich odvodzuje z rozdielu stavov medzi ťahmi (`learn()` v `bot2.py`):
+Input neobsahuje akcie súpera, bot ich odvodzuje z rozdielu stavov medzi ťahmi (`learn()` v `bot.py`):
 - **Detekcia útoku**: súperov trojuholník (vlastnil ho, mal jednotky na rohoch) zneutrálnel a naše
   jednotky na susednom dome zmizli viac, než vysvetľujú naše vlastné príkazy → útok, veľkosť = stack.
   Overené lokálne: 17/17 útokov detegovaných presne.
@@ -321,7 +333,7 @@ Fázy v ťahu, v tomto poradí:
 **Armádna gapa v strede hry** (oni 3× naša armáda → surround-taktika). Koreň: ich capture tempo
 4–7/ťah vs naše 1–2. Riešenie vyžaduje **paralelné multi-capture plánovanie so zdieľanými rohmi**
 (1. capture otvorí cluster, ďalšie stoja len 1–2 jednotky za ne-zdieľaný roh). Missions experiment
-(`bot_missions_backup.py`) mal tú myšlienku, ale online zamrzal — bug nezistený.
+(`bot_missions_backup.py`, git `1068179`) mal tú myšlienku, ale online zamrzal — bug nezistený.
 
 ### ČASOVÁ OS anti-pileup (AdrienGI analýza — prečo dissolve nestačí)
 
@@ -366,7 +378,7 @@ Hrať proti konkrétnemu hráčovi: `./cg replay --seed <S> --opponent <agent_id
 1. **Spawn tempo vs silní súperi (czuk, Arnaud, M_C)** — oni 2–16 spawnov/ťah, my 1–3.
    Náš temp je limitovaný počtom vlastnených trojuholníkov × stagger (1 spawn / 3 ťahy / tri).
    Cesta hore: **rýchlejšia expanzia** (viac capture/ťah). Missions experiment mal správnu myšlienku,
-   ale online zamrzal — pozri `bot_missions_backup.py`, bug nezistený (lokálny sim vyzeral zdravo!).
+   ale online zamrzal — pozri `bot_missions_backup.py` (git `1068179`), bug nezistený (lokálny sim vyzeral zdravo!).
 2. **ANTI-PILEUP (známy bug, 2 skipnuté testy v `tests/test_game_sim.py`)** — HLAVNÁ PRIČINA PREHIER
    s top Silver: `SPAWN` landing + **pass-through parking** + capture konvergencia vytvoria stack
    4–9 jednotiek na jednom dome → jeden súperov ATTACK/surround ich zmaže (ChuOkupai: 5+5+3+3+2 = 18
@@ -378,7 +390,7 @@ Hrať proti konkrétnemu hráčovi: `./cg replay --seed <S> --opponent <agent_id
    už commitnuté jednotky).
 3. **Capture tempo vs swarm súperov**: loick robí 4–7 capture/ťah v strede hry, my 1–2. Treba
    **paralelné multi-capture plánovanie** so zdieľanými rohmi (missions experiment mal správnu
-   myšlienku, ale online zamrzal — bug nezistený, `bot_missions_backup.py`).
+   myšlienku, ale online zamrzal — bug nezistený, `bot_missions_backup.py` v gite `1068179`).
 4. **Lokálny sim vs realita**: sim má jednu vlnu ATTACK (realita = multi-frame), nepoužívaj ho ako
    jediný signál — pred submitom vždy 2–3 online hry vs `default`.
 5. **BOT_SPEC.md** je čiastočne zastaraný (písal sa pre staršie verzie bota).
@@ -404,7 +416,19 @@ PY
 ./cg test --games 2            # online vs default (spomali! quota)
 ./cg replay --seed <S> --opponent <id|default> --ide   # 1 hra na konkrétnom seede
 ./cg limits                    # quota stav
+./cg rank "poznámka"           # zapíš rank do ranking.csv (po submite až keď percentage = 100)
+./cg add <game_id|replay URL> --note "prečo"   # pridaj hráča z hry: seeds/<nick>/ + seeds/index.csv
+./cg add --losses 30 --easy    # všetky prehry z posledných 30 ranking hier so slabšími (bez --easy: všetky)
+# ./cg replay samo uloží mapu do seeds/<nick>/<seed>.txt a zapíše rank (max raz za 30 min);
+# test hry proti agent_id ukladajú mapu tiež, ./cg test proti default nie
+
+# lokálna aréna: varianty a baseline do experiments/ (gitignored)
+git show HEAD:bot.py > experiments/base.py
+python3 scripts/variant.py experiments/v1.py '{"ADD_PLAN": 0.25}'      # bot.py + prepísané P
+python3 scripts/arena.py experiments/v1.py experiments/base.py --maps 20 --swap --jobs 8
 ```
+
+- **Šum arény**: identický bot vs baseline dá 20:20 až 47:33 / 80 hier → rozdiel < ~8/80 nie je signál.
 
 - **Quota**: 10/1min, 20/5min, 30/15min, 80/1h, 600/24h test hier. Ne spamovať `./cg test`.
 - **Debug online hry**: `results/runs.jsonl` (game_id, seed, tagy) → `./cg replay --game-id <ID> --ide`;

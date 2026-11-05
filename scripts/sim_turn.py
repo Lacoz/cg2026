@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Debug one bot turn or short rollout locally. Usage:
-  python scripts/sim_turn.py --seed-file tmp.txt --turns 5
+  python scripts/sim_turn.py --seed-file seeds/czuk/neg5800737516579411000.txt --turns 5
   python scripts/sim_turn.py --builtin-seed403401 --turns 10 --opp pass
 """
 from __future__ import annotations

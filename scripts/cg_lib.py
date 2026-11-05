@@ -14,6 +14,13 @@ from typing import Any, Dict, List, Optional
 
 API_ROOT = "https://www.codingame.com/api/v1"
 TOKEN_PATH = Path.home() / ".config/codingame/token"
+ROOT = Path(__file__).resolve().parents[1]
+SEEDS_DIR = ROOT / "seeds"
+RANKING_CSV = ROOT / "ranking.csv"
+RANKING_FIELDS = [
+    "ts_utc", "git_head", "submission_id", "league", "league_rank", "league_total",
+    "rank", "total", "score", "percentage", "note",
+]
 
 
 def token() -> str:
@@ -182,6 +189,104 @@ def parse_log(log: str, opponent: str, game_id: Optional[int] = None) -> GameMet
     )
 
 
+def opponent_nick(log: str) -> Optional[str]:
+    """Folder name of the agent that is not us in the log's `agents:` block ("default" for the CG default bot)."""
+    for m in re.finditer(r"^\s+\d+ (.+?) \((me, )?agent_id (-?\d+)", log, re.M):
+        if m.group(2):
+            continue
+        if m.group(3) == "-2":
+            return "default"
+        nick = re.sub(r"\[[^\]]*\]", "", m.group(1)).strip()
+        return re.sub(r"[^A-Za-z0-9_.-]", "_", nick) or None
+    return None
+
+
+def game_summary(log: str) -> dict:
+    """Players, our result and the seed of a game log, whatever seat we had (arena games: either)."""
+    agents = {}
+    for m in re.finditer(r"^\s+(\d+) (.+?) \((me, )?agent_id (-?\d+)(?:, rank (\d+))?\)", log, re.M):
+        agents[int(m.group(1))] = {
+            "nick": m.group(2), "me": bool(m.group(3)), "agent_id": int(m.group(4)),
+            "rank": int(m.group(5)) if m.group(5) else None,
+        }
+    me = next((i for i, a in agents.items() if a["me"]), 0)
+    opp = agents.get(1 - me, {})
+    scores = {}
+    sm = re.search(r"scores:\s*([^\n]+)", log)
+    if sm:
+        for part in sm.group(1).split():
+            if "=" in part:
+                k, v = part.split("=", 1)
+                scores[int(k)] = int(v)
+    rm = re.search(r"ranking[^:]*:\s*([^\n]+)", log)
+    order = [int(x) for x in rm.group(1).split()] if rm else []
+    if not order:
+        result = "?"
+    elif scores.get(me) == scores.get(1 - me):
+        result = "D"
+    else:
+        result = "W" if order[0] == me else "L"
+    seed_m = re.search(r"seed=(-?\d+)", log)
+    gm = re.search(r"^game (\d+)", log, re.M)
+    return {
+        "game_id": int(gm.group(1)) if gm else None,
+        "seed": seed_m.group(1) if seed_m else None,
+        "result": result,
+        "my_score": scores.get(me),
+        "opp_score": scores.get(1 - me),
+        "my_rank": agents.get(me, {}).get("rank"),
+        "opp_nick": opp.get("nick"),
+        "opp_agent_id": opp.get("agent_id"),
+        "opp_rank": opp.get("rank"),
+    }
+
+
+def save_seed(log: str) -> Optional[Path]:
+    """Store the full map of a game as seeds/<opponent>/<seed>.txt (negative seed -> `neg` prefix).
+    Returns the path if a new file was written."""
+    opts = parse_game_options(log)
+    nick = opponent_nick(log)
+    seed_m = re.search(r"seed=(-?\d+)", opts or "")
+    if not opts or "nodes=" not in opts or not nick or not seed_m:
+        return None
+    seed = seed_m.group(1)
+    path = SEEDS_DIR / nick / f"{'neg' + seed[1:] if seed.startswith('-') else seed}.txt"
+    if path.exists():
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(l for l in opts.splitlines() if "=" in l) + "\n", encoding="utf-8")
+    return path
+
+
+def log_rank(challenge: str, note: str = "", min_gap_minutes: int = 0) -> Optional[dict]:
+    """Append /progress to ranking.csv. With min_gap_minutes, skip if the last row is that recent."""
+    import csv
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    if min_gap_minutes and RANKING_CSV.exists():
+        rows = RANKING_CSV.read_text(encoding="utf-8").splitlines()
+        if len(rows) > 1:
+            try:
+                last = datetime.strptime(rows[-1].split(",", 1)[0], "%Y-%m-%dT%H:%M").replace(tzinfo=timezone.utc)
+                if now - last < timedelta(minutes=min_gap_minutes):
+                    return None
+            except ValueError:
+                pass
+    p = api("GET", f"/challenges/{challenge}/progress")
+    if not isinstance(p, dict) or "rank" not in p:
+        raise SystemExit(f"Unexpected /progress response: {p!r}")
+    row = {k: p.get(k) for k in RANKING_FIELDS}
+    row.update(ts_utc=now.strftime("%Y-%m-%dT%H:%M"), git_head=git_short_hash(ROOT), note=note)
+    new = not RANKING_CSV.exists()
+    with RANKING_CSV.open("a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=RANKING_FIELDS)
+        if new:
+            w.writeheader()
+        w.writerow(row)
+    return row
+
+
 def fetch_game_log(game_id: int) -> str:
     resp = api("GET", f"/games/{game_id}")
     if isinstance(resp, dict):
@@ -201,7 +306,9 @@ def run_test_game(
     show_in_ide: bool = False,
     overwrite_ide_game_parameters: bool = False,
     overwrite_ide_code: bool = False,
+    keep_seed: Optional[bool] = None,
 ) -> GameMetrics:
+    """keep_seed: store the map under seeds/<opponent>/; by default only for named opponents and replays."""
     code = bot_path.read_text()
     body: Dict[str, Any] = {
         "language": language,
@@ -246,6 +353,12 @@ def run_test_game(
         gm = re.search(r"^game (\d+)", log, re.M)
         if gm:
             gid = int(gm.group(1))
+    if keep_seed is None:
+        keep_seed = replay_game_id is not None or opponent not in ("default", "boss")
+    if keep_seed:
+        saved = save_seed(log)
+        if saved:
+            print(f"Seed uložený: {saved.relative_to(ROOT)}")
     return parse_log(log, opponent=opponent, game_id=gid)
 
 
@@ -275,9 +388,8 @@ def fetch_arena_losses(challenge: str, limit: int = 20) -> List[dict]:
     for b in resp.get("battles", []):
         if not b.get("done"):
             continue
-        if b.get("my_position", 0) != 0:
-            gid = b.get("game_id")
-            players = {p.get("nickname"): p for p in b.get("players", [])}
+        gid = b.get("game_id")
+        if game_summary(fetch_game_log(gid))["result"] == "L":
             opp = next(
                 (p.get("nickname") for p in b.get("players", []) if not p.get("me")),
                 "?",

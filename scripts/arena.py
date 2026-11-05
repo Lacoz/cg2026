@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local bot-vs-bot arena on real maps (from results/runs.jsonl + tmp_seed_*.txt).
+"""Local bot-vs-bot arena on real maps (from seeds/<player>/<seed>.txt + results/runs.jsonl).
 
 Usage: python3 scripts/arena.py botA.py botB.py [--maps N] [--jobs J] [--turns T] [--swap]
 Each map is played with A as player 0 (and, with --swap, also as player 1).
@@ -21,7 +21,7 @@ from game_sim import Board, BotSession  # noqa: E402
 
 def load_maps() -> list[str]:
     maps: dict[str, str] = {}
-    for p in sorted(ROOT.glob("tmp_seed_*.txt")):
+    for p in sorted(ROOT.glob("seeds/*/*.txt")):
         txt = p.read_text()
         seed = txt.splitlines()[0]
         maps[seed] = "\n".join(l for l in txt.splitlines() if "=" in l and not l.startswith("agents"))

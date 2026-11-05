@@ -21,6 +21,12 @@ case "$cmd" in
   weak|seeds)
     exec python3 scripts/weak.py "$@"
     ;;
+  add|add-player)
+    exec python3 scripts/add_player.py "$@"
+    ;;
+  rank|ranking)
+    exec python3 scripts/rank_log.py "$@"
+    ;;
   limits)
     python3 -c "
 import sys, yaml
@@ -47,6 +53,9 @@ Usage: ./cg <command>
   local [bot.py]            Build & run TryAngle referee + viewer (needs mvn, java)
   sim [--builtin-seed403401]  Lokálny rollout (scripts/sim_turn.py)
   unittest                  Lokálne testy simulátora + botu (bez CodinGame API)
+  add <game_id|url> | --losses [N] [--easy]
+                            Add the opponent's map to seeds/<nick>/ + seeds/index.csv
+  rank [note]               Append current ranking to ranking.csv
   limits                    Show API test-game rate limits
 
 Examples:

@@ -176,7 +176,7 @@ class czukRegressionTests(unittest.TestCase):
     """
 
     def setUp(self):
-        self.opts = Path(ROOT / "tmp_seed_neg5800737516579411000.txt").read_text()
+        self.opts = Path(ROOT / "seeds" / "czuk" / "neg5800737516579411000.txt").read_text()
 
     def bot_commands(self, board):
         s = BotSession(BOT)

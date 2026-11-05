@@ -15,6 +15,7 @@ from cg_lib import (  # noqa: E402
     fetch_game_log,
     ide_url,
     load_runs_jsonl,
+    log_rank,
     parse_game_options,
     parse_log,
     run_test_game,
@@ -163,7 +164,11 @@ def main() -> int:
         show_in_ide=args.ide,
         overwrite_ide_game_parameters=args.ide,
         overwrite_ide_code=args.sync_code,
+        keep_seed=True,
     )
+    row = log_rank(challenge, "replay", min_gap_minutes=30)
+    if row:
+        print(f"Rank zapísaný do ranking.csv: {row['league']} {row['league_rank']}/{row['league_total']} score {row['score']}")
 
     print(
         f"\nVýsledok: {'WIN' if m.win else 'LOSS'}  "
