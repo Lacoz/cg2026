@@ -24,7 +24,11 @@ P = {
     "EXP": 0.0,  # per unit in a >=3 stack inside enemy ATTACK reach
     "EXP2": 0.0,  # per unit in a 2-stack inside enemy ATTACK reach
     "DANGER_CAP": 0.0,  # danger weight of triangles the enemy can capture this turn
-    "SURR": 2.0,  # weight (in units) of the expected loss to being surrounded next turn
+    "SURR": 1.0,  # weight (in units) of the expected loss to being surrounded next turn
+    # P(our units on a house get surrounded | enemy can reach every neighbour, enemy units still
+    # needed to flip them all; last entry = that many or more), from 20 Gold logs (both sides);
+    # scaled by sur_act / sur_pred per opponent
+    "SUR_TAB": (0.17, 0.17, 0.13, 0.075, 0.035, 0.016, 0.008, 0.002),
     "SPR": 0.4,  # per surplus unit on a house
     "STK": 2.0,  # per extra unit stacked on a house with no enemy on it or next to it
     "FW": 1.0,  # pull per step toward the assigned corner
@@ -119,9 +123,8 @@ own_n = 0
 own_kept = 0
 opp_attacks = []  # stack sizes the opponent killed
 sur_lost = 0  # our units lost without an attack (surrounded)
-# P(our units on a house get surrounded | enemy can reach every neighbour, enemy units still
-# needed to flip them all), from ~80 logged games; scaled by sur_act / sur_pred per opponent
-SUR_TAB = [0.5, 0.12, 0.05, 0.015, 0.005]
+SUR_TAB = P["SUR_TAB"]
+SUR_MAX = len(SUR_TAB) - 1
 sur_pred = 0.0
 sur_act = 0
 prev = None  # (my, op, owner, opcap, our moves, our spawns, our attacks, tri_c, tri_nb, nb)
@@ -188,7 +191,7 @@ def learn(my, op, owner):
         if not ns or not all(pop[n] + sum(pop[m] for m in pnb[n]) > exp[n] for n in ns):
             continue
         need = sum(exp[n] - pop[n] + 1 for n in ns if pop[n] <= exp[n])
-        sur_pred += SUR_TAB[need if need < 4 else 4]
+        sur_pred += SUR_TAB[need if need < SUR_MAX else SUR_MAX]
         sur_act += deficit[h] > 0
     if kmax > 0:
         k = min(kmax, 5)
@@ -806,7 +809,7 @@ while True:
                         for n in ns:
                             if op[n] <= cnt[n]:
                                 need += cnt[n] - op[n] + 1
-                        v -= SURR_W * c * SUR_TAB[need if need < 4 else 4]
+                        v -= SURR_W * c * SUR_TAB[need if need < SUR_MAX else SUR_MAX]
                 if c > RISK_NET and risk[x] > 0:
                     v -= RISK * (c - RISK_NET) * pk[c if c < 5 else 5] * risk[x]
                 if c > o + 1:

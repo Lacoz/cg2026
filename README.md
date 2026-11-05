@@ -190,6 +190,42 @@ Nástroje: `scripts/arena.py A.py B.py --maps N --swap` (lokálny turnaj), `scri
 (variant parametrov), `scripts/replay_log.py <game_id> --losses --cmds` (resimulácia online logu +
 straty ATK/SUR), `scripts/trace.py`, `scripts/losses.py`.
 
+## Gold: 10 prehier + prekalibrovaný surround (2026-11-05 popoludní)
+
+Stav pred zmenou: Gold **252/356** (skóre 12.74, submit 41640587, 69W/55L). 10 posledných prehier je
+v `seeds/index.csv` s poznámkou `Gold loss` (bench: `--note-match "Gold loss" --limit 0`).
+
+Čo je v prehrách zle (my : súper, logy v simulátore): do T10 vyrovnaní, potom zachytenia za ťah
+1.2 : 2.5 (T11–15) a 1.0 : 2.8 (T16–25), spawny ~1 : 2, straty obkľúčením **21 : 5 jednotiek na hru**
+(vo výhrach 4 : 22). Spawny nedržíme (98 % vlastnených trojuholníkov použitých), cyklus
+použitie→znovuzachytenie je podobný (medián 5 : 4 ťahy), súper len drží ~2× viac trojuholníkov
+v obehu. Paths v Gold nepoužil ani jeden súper.
+
+**Príčina strát obkľúčením:** `SUR_TAB` (z ~80 Silver hier) v Gold silno podceňoval riziko pri
+`need` 2–5 (koľko súperových jednotiek ešte treba, aby preklopil všetkých susedov):
+
+| need | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7+ |
+|---|---|---|---|---|---|---|---|---|
+| starý `SUR_TAB` | 0.5 | 0.12 | 0.05 | 0.015 | 0.005 | 0.005 | 0.005 | 0.005 |
+| Gold, my obeťou (`experiments/surcal.py LOGY...`) | 0.20 | 0.21 | 0.155 | 0.085 | 0.041 | 0.019 | 0.006 | 0.002 |
+| **nový `SUR_TAB`** (obe strany, 20 Gold logov) | 0.17 | 0.17 | 0.13 | 0.075 | 0.035 | 0.016 | 0.008 | 0.002 |
+
+Bot sa 574× postavil do need=3 a 684× do need=4 (pre neho „bezpečné“). Zarátanie súperových
+spawnov (spawn je pred surround) do dosahu nepomohlo — rozlišuje rovnako.
+
+Výsledky (`SUR_TAB` = nová tabuľka, `SURR` = váha):
+
+| Variant | aréna vs starý bot | cf 10 Gold prehier sur / dU | cf 10 Gold výhier sur / dT | cf 40 nových online hier sur / dU |
+|---|---|---|---|---|
+| starý (`SURR` 2.0) | — | 196 / −494 | 36 / +20 | 463 / +267 |
+| **nový, `SURR` 1.0** | **213/368 (58 %)** | 157 / −463 | 18 / +33 | **351 / +395** |
+| nový, `SURR` 1.5 | 129/240 | | | |
+| nový, `SURR` 2.0 / 3.0 / 4.0 | 38/80, 43/80, — | 150 / 150 / 129 | 19 / 16 / 16 (dT −18…−11) | |
+| nový, `SURR` 0.7 | 23/48 | | | |
+
+Vyššie `SURR` znižuje straty ďalej, ale stojí trojuholníky (pasivita). Online 2× 10 Gold prehier
+(striedavo, rovnaký súper): starý 7/20, nový 7/20 — šum. **Zapnuté: nová tabuľka + `SURR=1.0`.**
+
 ## Statický plán ciest + debug kreslenie (Bronze, 2026-11-05)
 
 `bot.py` po každej zmene grafu (1. ťah + každý ADD/REMOVE ktoréhokoľvek hráča) spraví statickú
